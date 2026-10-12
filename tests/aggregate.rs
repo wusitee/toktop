@@ -1,0 +1,163 @@
+//! Pricing and aggregation contracts.
+
+use chrono::{Local, NaiveDate, TimeZone};
+use std::collections::HashMap;
+use toktop::aggregate::{self, Period};
+use toktop::model::{Event, Session, Tokens, Tool};
+use toktop::pricing::{Price, PriceTable, Tier};
+use toktop::store::Store;
+
+const LITELLM: &str = r#"{
+    "sample_spec": {"input_cost_per_token": "doc", "mode": "one of chat, embedding"},
+    "claude-opus-5-5": {"mode": "chat", "input_cost_per_token": 4e-06, "output_cost_per_token": 2e-05,
+        "cache_read_input_token_cost": 2e-07, "cache_creation_input_token_cost": 5e-06,
+        "cache_creation_input_token_cost_above_1hr": 8e-06},
+    "azure/gpt-6.1-sol": {"mode": "chat", "input_cost_per_token": 9e-06, "output_cost_per_token": 9e-05},
+    "openai/gpt-6.1-sol": {"mode": "chat", "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05,
+        "input_cost_per_token_above_272k_tokens": 4e-06, "output_cost_per_token_above_272k_tokens": 2e-05},
+    "text-embedding-x": {"mode": "embedding", "input_cost_per_token": 1e-07, "output_cost_per_token": 0}
+}"#;
+
+#[test]
+fn litellm_table_resolves_tool_model_ids() {
+    let table = PriceTable::from_litellm(LITELLM.as_bytes()).unwrap();
+    assert!(table.lookup("text-embedding-x").is_none());
+    // First-party provider entries win over resellers for bare names.
+    assert_eq!(table.lookup("gpt-6.1-sol").unwrap().input, 2e-06);
+    // Effort and variant suffixes fall back to the catalog name.
+    assert_eq!(
+        table.lookup("claude-opus-5-5-thinking").unwrap().input,
+        4e-06
+    );
+    assert!(table.lookup("claude-opus").is_none());
+    assert!(table.lookup("codex-auto-review").is_none());
+}
+
+#[test]
+fn cost_applies_cache_and_long_context_rates() {
+    let price = Price {
+        input: 4e-06,
+        output: 2e-05,
+        cache_read: Some(2e-07),
+        cache_write: Some(5e-06),
+        cache_write_1h: Some(8e-06),
+        tier: Some(Tier {
+            threshold: 1000,
+            input: 8e-06,
+            output: 4e-05,
+            cache_read: None,
+        }),
+    };
+    let tokens = Tokens {
+        input: 100,
+        output: 10,
+        cache_read: 500,
+        cache_write: 300,
+        cache_write_1h: 100,
+        reasoning: 5,
+    };
+    let expected = 100.0 * 4e-06 + 15.0 * 2e-05 + 500.0 * 2e-07 + 200.0 * 5e-06 + 100.0 * 8e-06;
+    assert!((price.cost(&tokens) - expected).abs() < 1e-12);
+
+    let long = Tokens {
+        input: 2000,
+        ..Tokens::default()
+    };
+    assert!((price.cost(&long) - 2000.0 * 8e-06).abs() < 1e-12);
+}
+
+fn ms(date: NaiveDate, hour: u32) -> i64 {
+    Local
+        .from_local_datetime(&date.and_hms_opt(hour, 0, 0).unwrap())
+        .earliest()
+        .unwrap()
+        .timestamp_millis()
+}
+
+fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&str>)>) -> Session {
+    Session {
+        id: id.to_owned(),
+        project: Some(project.to_owned()),
+        title: None,
+        models: vec![model.to_owned()],
+        events: events
+            .into_iter()
+            .map(|(ts, input, key)| Event {
+                ts,
+                model: 0,
+                tokens: Tokens {
+                    input,
+                    ..Tokens::default()
+                },
+                key: key.map(Into::into),
+            })
+            .collect(),
+        limits: None,
+    }
+}
+
+#[test]
+fn summary_filters_by_period_and_dedups_across_files() {
+    let today = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(); // a Wednesday
+    let now = ms(today, 12);
+    let monday = NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
+    let last_month = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
+
+    let mut store = Store::default();
+    store.insert_session(
+        "/a.jsonl".into(),
+        Tool::ClaudeCode,
+        session(
+            "a",
+            "/work/app",
+            "claude-opus-5-5",
+            vec![(ms(today, 9), 100, Some("m1")), (ms(monday, 9), 20, None)],
+        ),
+    );
+    // A resumed copy of the same response in another file.
+    store.insert_session(
+        "/b.jsonl".into(),
+        Tool::ClaudeCode,
+        session(
+            "b",
+            "/work/other",
+            "claude-opus-5-5",
+            vec![(ms(today, 9), 100, Some("m1"))],
+        ),
+    );
+    store.insert_session(
+        "/c.jsonl".into(),
+        Tool::Codex,
+        session(
+            "c",
+            "/work/app/",
+            "gpt-6.1-sol",
+            vec![(ms(last_month, 9), 7, None), (now - 60_000, 3, None)],
+        ),
+    );
+    store.titles.insert("c".into(), "Indexed title".into());
+
+    let prices = PriceTable::from_prices(HashMap::from([(
+        "claude-opus-5-5".to_owned(),
+        Price {
+            input: 0.01,
+            ..Price::default()
+        },
+    )]));
+
+    let today_summary = aggregate::summarize(&store, &prices, Period::Today, now);
+    assert_eq!(today_summary.total.tokens.input, 103);
+    assert!((today_summary.total.cost - 1.0).abs() < 1e-9);
+    assert_eq!(today_summary.unpriced, ["gpt-6.1-sol"]);
+    assert_eq!(today_summary.by_project[0].label, "app");
+    assert_eq!(today_summary.by_project.len(), 1);
+    assert_eq!(today_summary.sessions[0].title, "Indexed title");
+    assert!((today_summary.rate_per_min - 3.0 / 5.0).abs() < 1e-9);
+
+    let week = aggregate::summarize(&store, &prices, Period::ThisWeek, now);
+    assert_eq!(week.total.tokens.input, 123);
+    let all = aggregate::summarize(&store, &prices, Period::AllTime, now);
+    assert_eq!(all.total.tokens.input, 130);
+    assert_eq!(all.daily.len(), 3);
+    assert_eq!(all.daily[0].date, last_month);
+}

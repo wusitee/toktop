@@ -1,6 +1,25 @@
 # toktop
 
-A native Linux (Wayland) desktop monitor for AI coding tool token usage, written in Rust and GTK4.
-It is a lightweight reimplementation of [Token Monitor](https://github.com/Javis603/token-monitor) for Linux.
+A native Linux desktop monitor for AI coding tool token usage, written in Rust. It is a lightweight reimplementation of [Token Monitor](https://github.com/Javis603/token-monitor) for Linux.
 
-Work in progress.
+Supported tools: Claude Code, Codex and Antigravity.
+
+## Build
+
+Requires Rust 1.85+ and SQLite.
+
+```sh
+cargo build --release
+```
+
+## Usage
+
+Print a usage summary:
+
+```sh
+toktop --print [today|week|7d|month|30d|all]
+```
+
+## Documentation
+
+- [Architecture](docs/architecture.md): sources, parsing and token accounting rules, pricing.

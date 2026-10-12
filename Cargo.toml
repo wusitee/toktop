@@ -1,0 +1,25 @@
+[package]
+name = "toktop"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Native Linux desktop monitor for AI coding tool token usage"
+license = "MIT"
+repository = "https://github.com/wusitee/toktop"
+
+[dependencies]
+chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
+memchr = "=2.8.3"
+rusqlite = "=0.40.2"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+ureq = { version = "=3.4.2", default-features = false, features = ["native-tls", "gzip"] }
+
+[dev-dependencies]
+tempfile = "=3.27.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
