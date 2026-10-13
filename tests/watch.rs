@@ -29,6 +29,25 @@ fn changed(rx: &Receiver<Change>, path: &Path) {
     });
 }
 
+/// Writes `path` until a write is reported. After a directory change the new
+/// watch registers asynchronously; writes before that are recovered by the
+/// worker's rescan, not by events, so only later writes are asserted.
+fn reported(rx: &Receiver<Change>, path: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        fs::write(path, "update").unwrap();
+        let attempt = Instant::now() + Duration::from_millis(200);
+        while let Ok(change) = rx.recv_timeout(attempt.saturating_duration_since(Instant::now())) {
+            if let Change::Paths(paths) = change
+                && paths.iter().any(|item| item == path)
+            {
+                return;
+            }
+        }
+    }
+    panic!("watcher did not report {}", path.display());
+}
+
 fn unchanged(rx: &Receiver<Change>, path: &Path) {
     let deadline = Instant::now() + Duration::from_millis(100);
     loop {
@@ -67,9 +86,7 @@ fn late_root_moved_aside_and_recreated_keeps_watching() {
     fs::rename(&root, dir.path().join("old-sessions")).unwrap();
     receive(&rx, |change| matches!(change, Change::Rescan));
     fs::create_dir(&root).unwrap();
-    receive(&rx, |change| matches!(change, Change::Rescan));
-    fs::write(&file, "replacement").unwrap();
-    changed(&rx, &file);
+    reported(&rx, &file);
     // Writes to the moved inode must no longer be reported under the old path.
     fs::write(dir.path().join("old-sessions/outside.jsonl"), "outside").unwrap();
     unchanged(&rx, &root.join("outside.jsonl"));
@@ -88,9 +105,7 @@ fn moved_subtree_reports_its_new_path_and_leaving_root_drops_watches() {
     coverage(&rx);
     fs::rename(root.join("old"), root.join("new")).unwrap();
     receive(&rx, |change| matches!(change, Change::Rescan));
-    let file = root.join("new/nested/session.jsonl");
-    fs::write(&file, "new location").unwrap();
-    changed(&rx, &file);
+    reported(&rx, &root.join("new/nested/session.jsonl"));
 
     fs::rename(root.join("new"), dir.path().join("outside")).unwrap();
     receive(&rx, |change| matches!(change, Change::Rescan));
@@ -110,9 +125,7 @@ fn title_parent_created_later_and_title_removed_are_reported() {
     .unwrap();
     coverage(&rx);
     fs::create_dir_all(&parent).unwrap();
-    receive(&rx, |change| matches!(change, Change::Rescan));
-    fs::write(&file, "title").unwrap();
-    changed(&rx, &file);
+    reported(&rx, &file);
     fs::rename(&file, parent.join("saved.db")).unwrap();
     changed(&rx, &file);
     fs::write(&file, "replacement").unwrap();

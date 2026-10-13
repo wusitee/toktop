@@ -14,6 +14,19 @@ pub enum Tool {
 impl Tool {
     pub const ALL: [Tool; 3] = [Tool::ClaudeCode, Tool::Codex, Tool::Antigravity];
 
+    /// Short name used in the config file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Tool::ClaudeCode => "claude-code",
+            Tool::Codex => "codex",
+            Tool::Antigravity => "antigravity",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Tool> {
+        Tool::ALL.into_iter().find(|tool| tool.key() == key)
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Tool::ClaudeCode => "Claude Code",

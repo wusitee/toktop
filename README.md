@@ -28,7 +28,11 @@ install -Dm644 data/io.github.wusitee.toktop.desktop ~/.local/share/applications
 
 Run `toktop` to open the window. Pick the period from the header menu. The Overview page shows totals, per-tool usage, Codex rate limits and a 30-day chart; Models, Projects and Sessions break usage down further. Expand a row for its input, output, reasoning and cache split.
 
-Costs use a cached price list that refreshes daily. If no prices are available, costs show “—” with a warning in the window, and “cost unavailable” in printed summaries; token counts remain available.
+With a panel that hosts tray icons (waybar, KDE Plasma, GNOME with the AppIndicator extension), toktop also shows a tray icon. Closing the window keeps it running there; click the icon to reopen the window, or use its menu to change the period or quit. To start in the tray at login:
+
+```sh
+install -Dm644 data/io.github.wusitee.toktop-autostart.desktop ~/.config/autostart/io.github.wusitee.toktop.desktop
+```
 
 Print a summary without the GUI:
 
@@ -36,9 +40,12 @@ Print a summary without the GUI:
 toktop --print [today|week|7d|month|30d|all]
 ```
 
+Settings are described in [docs/configuration.md](docs/configuration.md).
+
 ## Documentation
 
-- [Architecture](docs/architecture.md): threads, modules, data flow, watching, memory
+- [Architecture](docs/architecture.md): threads, application lifecycle, modules, watching, memory
 - [Sources](docs/sources.md): where each tool's logs are read from
 - [Token accounting](docs/accounting.md): per-tool parsing and deduplication rules
 - [Pricing](docs/pricing.md): price source, model lookup and cost rules
+- [Configuration](docs/configuration.md): settings file and environment variables

@@ -9,8 +9,18 @@ toktop reads the local logs of AI coding tools, turns them into usage events and
 | GTK main | Renders `Summary` values. Never reads files. |
 | `toktop-worker` | Registers the watcher before the initial scan, owns the `Store`, applies file changes and sends summaries when data changes or the clock ticks. |
 | `toktop-watch` | Blocks on inotify and forwards changed paths to the worker. |
+| ksni service, `toktop-tray` | Serve the tray icon over D-Bus and push tooltip updates; tray clicks and menu items are forwarded to the GTK main thread. Present only when the tray is registered. |
 
 The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The UI updates row text in place while a list keeps the same rows in the same order, and rebuilds the list only when rows appear, disappear, reorder or gain detail rows. This keeps focus, scroll position and expansion through live updates and keeps per-update CPU low.
+
+## Application lifecycle
+
+`Shell` (in `src/ui/mod.rs`) lives for the whole process. It owns the worker, the latest summary, the settings ([configuration.md](configuration.md)) and the tray icon. The window is built on demand from the latest summary and dropped when closed.
+
+- toktop is a single-instance `GApplication`. Running `toktop` while it is already running shows the existing window; `toktop --background` then does nothing.
+- When the tray icon is registered, the application holds itself open, so closing the window keeps toktop in the tray. Without a tray host, closing the window quits, and `--background` opens the window instead.
+- Clicking the tray icon toggles the window. Its menu shows the window, changes the period, refreshes prices or quits.
+- The period and window size are saved to the config file when they change.
 
 ## Data flow
 
@@ -30,7 +40,8 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 | `src/paths.rs` | Source and cache locations, with the tools' environment overrides. |
 | `src/watch.rs` | Recursive inotify watcher. |
 | `src/worker.rs` | Worker thread loop. |
-| `src/ui/` | GTK 4 / libadwaita window and the daily chart. |
+| `src/ui/` | Application shell, GTK 4 / libadwaita window, daily chart and tray icon. |
+| `src/config.rs` | Settings file. |
 
 ## Incremental reads
 
@@ -50,11 +61,13 @@ The watcher subscribes to content and directory events only (modify, create, del
 
 ## Debugging
 
-Run `TOKTOP_DEBUG=1 toktop` to print timestamped stderr lines for window `close-request`, application `shutdown`, `app.quit` activation and GApplication `name-lost`. These diagnostics help distinguish window closure, an explicit quit and loss of the application’s D-Bus name. They do not keep the application alive after its window closes.
+Run `TOKTOP_DEBUG=1 toktop` to print timestamped stderr lines for window `close-request`, application `shutdown`, `app.quit` activation and GApplication `name-lost`. These diagnostics help distinguish window closure, an explicit quit and loss of the application’s D-Bus name.
 
 ## Memory
 
-glibc is limited to one malloc arena (`M_ARENA_MAX=1`) at startup, and the heap is trimmed after full scans. Without this the parallel initial scan leaves about 20 MB stranded in per-thread arenas. The retained data for ~11K events is about 4 MB; most of the remaining footprint is GTK's own baseline.
+glibc is limited to one malloc arena (`M_ARENA_MAX=1`) at startup, and the heap is trimmed after full scans and after the window closes. Without this the parallel initial scan leaves about 20 MB stranded in per-thread arenas. The retained data for ~11K events is about 4 MB; most of the remaining footprint is GTK's own.
+
+Started with `--background`, toktop uses about 25 MB PSS until the window is first opened. GTK keeps its style, icon and renderer caches after that, so closing the window again leaves about 48 MB; repeated open/close cycles do not grow it. With the window open, GTK's accessibility objects add roughly 15 MB on a desktop session with an accessibility bus.
 
 ## Periods
 

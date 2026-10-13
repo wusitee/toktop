@@ -1,15 +1,22 @@
-//! GTK4 / libadwaita window.
+//! GTK4 / libadwaita window and tray icon.
+//!
+//! [`Shell`] lives for the whole process: it owns the worker, the latest
+//! summary, the settings and the tray icon. The window is created on demand
+//! and destroyed when closed, so a tray-only process does not keep its
+//! widgets in memory.
 
 mod chart;
+mod tray;
 
 use adw::prelude::*;
 use chrono::{Days, Local};
 use gtk::{gio, glib};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
 use toktop::aggregate::{Period, Row, SessionRow, Summary, Usage};
+use toktop::config::{self, Config};
 use toktop::format;
 use toktop::model::LimitWindow;
 use toktop::worker::{self, Msg};
@@ -18,9 +25,31 @@ const APP_ID: &str = "io.github.wusitee.toktop";
 const CHART_DAYS: u64 = 30;
 const MAX_SESSIONS: usize = 100;
 
-pub fn run() -> glib::ExitCode {
+pub struct Options {
+    /// Start without a window when the tray icon is available.
+    pub background: bool,
+}
+
+pub fn run(options: Options) -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(activate);
+    let background = options.background;
+    let shell = Rc::new(Shell::new(&app, options));
+    // `register` emits `startup` on the primary instance.
+    let started = shell.clone();
+    app.connect_startup(move |_| started.start());
+    if let Err(error) = app.register(gio::Cancellable::NONE) {
+        eprintln!("toktop: {error}");
+        return glib::ExitCode::FAILURE;
+    }
+    if app.is_remote() {
+        // Another instance is running: show its window unless asked not to.
+        if !background {
+            app.activate();
+        }
+        return glib::ExitCode::SUCCESS;
+    }
+    let activated = shell.clone();
+    app.connect_activate(move |_| activated.activate());
     app.connect_shutdown(|_| debug_event("application shutdown"));
     app.connect_name_lost(|_| {
         debug_event("GApplication name-lost");
@@ -53,33 +82,272 @@ fn display_cost(cost: f64, available: bool) -> String {
     }
 }
 
-fn activate(app: &adw::Application) {
-    if let Some(window) = app.active_window() {
-        window.present();
-        return;
-    }
-    let ui = Rc::new(Ui::new(app));
-    let (tx, rx) = async_channel::unbounded::<Summary>();
-    match worker::spawn(Period::default(), move |summary| {
-        let _ = tx.send_blocking(summary);
-    }) {
-        Ok(worker) => ui.connect_period(worker),
-        Err(error) => {
-            ui.banner.set_title(&format!("Could not start: {error}"));
-            ui.banner.set_revealed(true);
-        }
-    }
-    let target = ui.clone();
-    glib::spawn_future_local(async move {
-        while let Ok(mut summary) = rx.recv().await {
-            // Only the newest summary matters.
-            while let Ok(newer) = rx.try_recv() {
-                summary = newer;
+/// Process-wide state on the GTK main thread.
+struct Shell {
+    app: adw::Application,
+    options: Options,
+    config: RefCell<Config>,
+    /// False when the config file exists but could not be read; it is then
+    /// never overwritten.
+    config_writable: bool,
+    worker: RefCell<Option<Sender<Msg>>>,
+    latest: RefCell<Option<Summary>>,
+    ui: RefCell<Option<Rc<Ui>>>,
+    tray: RefCell<Option<tray::Tray>>,
+    /// Keeps the application running while the tray icon exists.
+    hold: RefCell<Option<gio::ApplicationHoldGuard>>,
+    activated: Cell<bool>,
+}
+
+impl Shell {
+    fn new(app: &adw::Application, options: Options) -> Self {
+        let (config, config_writable) = match Config::load(&config::path()) {
+            Ok(config) => (config, true),
+            Err(error) => {
+                eprintln!(
+                    "toktop: ignoring {} ({error}); using defaults",
+                    config::path().display()
+                );
+                (Config::default(), false)
             }
-            target.update(&summary);
+        };
+        Shell {
+            app: app.clone(),
+            options,
+            config: RefCell::new(config),
+            config_writable,
+            worker: RefCell::default(),
+            latest: RefCell::default(),
+            ui: RefCell::default(),
+            tray: RefCell::default(),
+            hold: RefCell::default(),
+            activated: Cell::new(false),
         }
-    });
-    ui.window.present();
+    }
+
+    fn start(self: &Rc<Self>) {
+        let (period, tools, want_tray) = {
+            let config = self.config.borrow();
+            (config.period, config.tools.clone(), config.tray)
+        };
+        let (tx, rx) = async_channel::unbounded::<Summary>();
+        match worker::spawn(period, tools, move |summary| {
+            let _ = tx.send_blocking(summary);
+        }) {
+            Ok(worker) => {
+                self.worker.replace(Some(worker));
+            }
+            Err(error) => eprintln!("toktop: could not start worker: {error}"),
+        }
+        let shell = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(mut summary) = rx.recv().await {
+                // Only the newest summary matters.
+                while let Ok(newer) = rx.try_recv() {
+                    summary = newer;
+                }
+                let Some(shell) = shell.upgrade() else { return };
+                shell.show_summary(summary);
+            }
+        });
+
+        if want_tray {
+            self.start_tray(period);
+        }
+    }
+
+    fn start_tray(self: &Rc<Self>, period: Period) {
+        let (tx, rx) = async_channel::unbounded();
+        let state = tray::State {
+            title: "toktop".into(),
+            description: String::new(),
+            period,
+        };
+        match tray::Tray::spawn(tx, state) {
+            Ok(tray) => {
+                self.tray.replace(Some(tray));
+                self.hold.replace(Some(self.app.hold()));
+            }
+            Err(error) => {
+                eprintln!("toktop: no tray icon ({error})");
+                return;
+            }
+        }
+        let shell = Rc::downgrade(self);
+        glib::spawn_future_local(async move {
+            while let Ok(command) = rx.recv().await {
+                let Some(shell) = shell.upgrade() else { return };
+                match command {
+                    tray::Command::Toggle => shell.toggle_window(),
+                    tray::Command::Show => shell.show_window(),
+                    tray::Command::Period(period) => shell.set_period(period),
+                    tray::Command::RefreshPrices => shell.send(Msg::RefreshPrices),
+                    tray::Command::Quit => shell.app.quit(),
+                }
+            }
+        });
+    }
+
+    fn activate(self: &Rc<Self>) {
+        let first = !self.activated.replace(true);
+        if first && self.options.background {
+            if self.tray.borrow().is_some() {
+                return;
+            }
+            eprintln!("toktop: no tray icon available; opening the window");
+        }
+        self.show_window();
+    }
+
+    fn send(&self, msg: Msg) {
+        if let Some(worker) = self.worker.borrow().as_ref() {
+            let _ = worker.send(msg);
+        }
+    }
+
+    fn show_summary(&self, summary: Summary) {
+        if let Some(ui) = self.ui.borrow().as_ref() {
+            ui.update(&summary);
+        }
+        if let Some(tray) = self.tray.borrow_mut().as_mut() {
+            tray.set(tray_state(&summary));
+        }
+        self.latest.replace(Some(summary));
+    }
+
+    fn show_window(self: &Rc<Self>) {
+        if let Some(ui) = self.ui.borrow().as_ref() {
+            ui.window.present();
+            return;
+        }
+        let ui = {
+            let config = self.config.borrow();
+            Rc::new(Ui::new(&self.app, &config.window, config.period))
+        };
+        let shell = Rc::downgrade(self);
+        ui.period.connect_selected_notify(move |dropdown| {
+            if let (Some(shell), Some(&period)) = (
+                shell.upgrade(),
+                Period::ALL.get(dropdown.selected() as usize),
+            ) {
+                shell.set_period(period);
+            }
+        });
+        let shell = Rc::downgrade(self);
+        ui.window.connect_close_request(move |window| {
+            debug_event("window close-request");
+            if let Some(shell) = shell.upgrade() {
+                shell.close_window(window);
+            }
+            glib::Propagation::Proceed
+        });
+        if let Some(summary) = self.latest.borrow().as_ref() {
+            ui.update(summary);
+        }
+        ui.window.present();
+        self.ui.replace(Some(ui));
+    }
+
+    /// Saves the window size and drops the widgets; GTK destroys the window
+    /// after this returns.
+    fn close_window(&self, window: &adw::ApplicationWindow) {
+        let (width, height) = window.default_size();
+        let maximized = window.is_maximized();
+        self.update_config(|config| {
+            if !maximized && width > 0 && height > 0 {
+                config.window.width = width;
+                config.window.height = height;
+            }
+            config.window.maximized = maximized;
+        });
+        self.ui.replace(None);
+        // Return freed widget memory once the window is gone.
+        glib::idle_add_local_once(worker::trim_heap);
+    }
+
+    fn toggle_window(self: &Rc<Self>) {
+        let open = self.ui.borrow().as_ref().map(|ui| ui.window.clone());
+        match open {
+            Some(window) if window.is_active() => window.close(),
+            _ => self.show_window(),
+        }
+    }
+
+    fn set_period(&self, period: Period) {
+        if self.config.borrow().period == period {
+            return;
+        }
+        self.update_config(|config| config.period = period);
+        self.send(Msg::Period(period));
+        if let Some(ui) = self.ui.borrow().as_ref() {
+            ui.select_period(period);
+        }
+    }
+
+    fn update_config(&self, change: impl FnOnce(&mut Config)) {
+        let mut config = self.config.borrow_mut();
+        let before = config.clone();
+        change(&mut config);
+        if *config == before || !self.config_writable {
+            return;
+        }
+        if let Err(error) = config.save(&config::path()) {
+            eprintln!("toktop: could not save settings: {error}");
+        }
+    }
+}
+
+fn period_index(period: Period) -> u32 {
+    Period::ALL
+        .iter()
+        .position(|candidate| *candidate == period)
+        .unwrap_or(0) as u32
+}
+
+/// Tooltip text for the tray icon.
+fn tray_state(summary: &Summary) -> tray::State {
+    let total = &summary.total;
+    let mut title = format!(
+        "{}: {} tokens",
+        summary.period.label(),
+        format::tokens(total.tokens.total())
+    );
+    if summary.prices_available {
+        title.push_str(&format!(" · {}", format::cost(total.cost)));
+    }
+    let mut lines = Vec::new();
+    if summary.rate_per_min > 0.0 {
+        lines.push(format!(
+            "Live: {} tokens/min",
+            format::tokens(summary.rate_per_min as u64)
+        ));
+    }
+    if let Some(limits) = &summary.codex_limits {
+        let now_s = toktop::now_ms() / 1000;
+        let windows: Vec<String> = [&limits.primary, &limits.secondary]
+            .into_iter()
+            .flatten()
+            .map(|window| {
+                let used = if window.resets_at.is_some_and(|at| at <= now_s) {
+                    0.0
+                } else {
+                    window.used_percent
+                };
+                format!(
+                    "{} {used:.0}%",
+                    window_name(window.window_minutes).to_lowercase()
+                )
+            })
+            .collect();
+        if !windows.is_empty() {
+            lines.push(format!("Codex {}", windows.join(" · ")));
+        }
+    }
+    tray::State {
+        title,
+        description: lines.join("\n"),
+        period: summary.period,
+    }
 }
 
 /// A boxed list inside a titled group.
@@ -183,10 +451,11 @@ struct SessionList {
 }
 
 impl Ui {
-    fn new(app: &adw::Application) -> Self {
+    fn new(app: &adw::Application, size: &config::Window, selected: Period) -> Self {
         let labels: Vec<&str> = Period::ALL.iter().map(|period| period.label()).collect();
         let period = gtk::DropDown::from_strings(&labels);
         period.set_tooltip_text(Some("Period"));
+        period.set_selected(period_index(selected));
 
         let stack = adw::ViewStack::new();
         let header = adw::HeaderBar::new();
@@ -271,15 +540,11 @@ impl Ui {
         let window = adw::ApplicationWindow::builder()
             .application(app)
             .title("toktop")
-            .default_width(420)
-            .default_height(680)
+            .default_width(size.width)
+            .default_height(size.height)
+            .maximized(size.maximized)
             .content(&toolbar)
             .build();
-
-        window.connect_close_request(|_| {
-            debug_event("window close-request");
-            glib::Propagation::Proceed
-        });
 
         Ui {
             window,
@@ -303,12 +568,8 @@ impl Ui {
         }
     }
 
-    fn connect_period(&self, worker: Sender<Msg>) {
-        self.period.connect_selected_notify(move |dropdown| {
-            if let Some(&period) = Period::ALL.get(dropdown.selected() as usize) {
-                let _ = worker.send(Msg::Period(period));
-            }
-        });
+    fn select_period(&self, period: Period) {
+        self.period.set_selected(period_index(period));
     }
 
     fn update(&self, summary: &Summary) {

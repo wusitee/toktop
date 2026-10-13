@@ -43,11 +43,18 @@ impl Stamp {
     }
 }
 
-#[derive(Default)]
 pub struct Store {
     pub files: HashMap<PathBuf, FileEntry>,
     /// Session titles kept by the tools outside their transcripts.
     pub titles: HashMap<String, String>,
+    /// Tools whose sources are read; others are ignored.
+    pub tools: Vec<Tool>,
+}
+
+impl Default for Store {
+    fn default() -> Self {
+        Store::with_tools(Tool::ALL.to_vec())
+    }
 }
 
 /// Which tool owns `path`, if it is a source file toktop reads.
@@ -98,6 +105,14 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 impl Store {
+    pub fn with_tools(tools: Vec<Tool>) -> Self {
+        Store {
+            files: HashMap::new(),
+            titles: HashMap::new(),
+            tools,
+        }
+    }
+
     /// Adds an already-parsed session, as if read from `path`.
     pub fn insert_session(&mut self, path: PathBuf, tool: Tool, session: Session) {
         self.files.insert(
@@ -118,10 +133,10 @@ impl Store {
         Ok(())
     }
 
-    /// Every source file currently on disk.
-    pub fn discover() -> Vec<(PathBuf, Tool)> {
+    /// Every source file of an enabled tool currently on disk.
+    pub fn discover(&self) -> Vec<(PathBuf, Tool)> {
         let mut found = Vec::new();
-        for tool in Tool::ALL {
+        for &tool in &self.tools {
             for root in paths::source_roots(tool) {
                 let mut files = Vec::new();
                 walk(&root, &mut files);
@@ -139,7 +154,7 @@ impl Store {
     /// Brings the store in line with the disk: parses new or changed files
     /// and drops deleted ones. Returns whether anything changed.
     pub fn sync_all(&mut self) -> bool {
-        let found = Self::discover();
+        let found = self.discover();
         let mut changed = false;
         let present: std::collections::HashSet<&PathBuf> =
             found.iter().map(|(path, _)| path).collect();
@@ -201,9 +216,12 @@ impl Store {
             let path = source_path(&path);
             let known = self.files.get(&path).map(|entry| entry.tool);
             let Some(tool) = classify(&path).or(known) else {
-                titles_dirty |= is_title_source(&path);
+                titles_dirty |= paths::title_sources(&self.tools).contains(&path);
                 continue;
             };
+            if !self.tools.contains(&tool) {
+                continue;
+            }
             if !path.exists() {
                 changed |= self.files.remove(&path).is_some();
                 continue;
@@ -243,16 +261,19 @@ impl Store {
 
     /// Returns whether any title changed.
     fn reload_titles(&mut self) -> bool {
-        let mut titles = crate::parse::antigravity::titles(&paths::antigravity_homes());
-        titles.extend(codex_titles(&paths::codex_session_index()));
+        let mut titles = HashMap::new();
+        if self.tools.contains(&Tool::Antigravity) {
+            titles.extend(crate::parse::antigravity::titles(
+                &paths::antigravity_homes(),
+            ));
+        }
+        if self.tools.contains(&Tool::Codex) {
+            titles.extend(codex_titles(&paths::codex_session_index()));
+        }
         let changed = titles != self.titles;
         self.titles = titles;
         changed
     }
-}
-
-fn is_title_source(path: &Path) -> bool {
-    paths::title_sources().iter().any(|source| source == path)
 }
 
 fn read_file(tool: Tool, path: &Path) -> io::Result<FileEntry> {
