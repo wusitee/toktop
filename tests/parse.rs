@@ -21,10 +21,15 @@ fn append(path: &Path, text: &str) {
 const CLAUDE: &str = concat!(
     r#"{"type":"user","sessionId":"s1","cwd":"/work/app","timestamp":"2026-10-01T10:00:00Z"}"#,
     "\n",
-    // Streaming writes one response twice; the second copy has the final output count.
-    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":40,"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
+    // Streaming writes one response several times. The first copy is a bare
+    // prompt snapshot (whole prompt as input, no cache fields); the second
+    // reports the cache split and a 1-hour split larger than its partial total.
+    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":150,"output_tokens":1}}}"#,
     "\n",
-    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:02Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":50,"cache_read_input_tokens":100,"cache_creation_input_tokens":40}}}"#,
+    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
+    "\n",
+    // Final copy: full output, an advisor call listed in `iterations`.
+    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:02Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":50,"cache_read_input_tokens":100,"cache_creation_input_tokens":40,"iterations":[{"type":"message","input_tokens":10,"output_tokens":50},{"type":"advisor_message","model":"claude-fable-5-1","input_tokens":700,"output_tokens":7}]}}}"#,
     "\n",
     r#"{"type":"assistant","sessionId":"s1","timestamp":"2026-10-01T10:00:03Z","message":{"id":"m2","model":"<synthetic>","usage":{"input_tokens":0,"output_tokens":0}}}"#,
     "\n",
@@ -46,7 +51,7 @@ fn claude_merges_streaming_duplicates_and_prefers_custom_titles() {
     assert_eq!(session.id, "s1");
     assert_eq!(session.project.as_deref(), Some("/work/app"));
     assert_eq!(session.title.as_deref(), Some("Renamed"));
-    assert_eq!(session.events.len(), 1);
+    assert_eq!(session.events.len(), 2);
     assert_eq!(
         session.events[0].tokens,
         Tokens {
@@ -58,6 +63,9 @@ fn claude_merges_streaming_duplicates_and_prefers_custom_titles() {
             reasoning: 0,
         }
     );
+    let advisor = &session.events[1];
+    assert_eq!(session.models[advisor.model as usize], "claude-fable-5-1");
+    assert_eq!((advisor.tokens.input, advisor.tokens.output), (700, 7));
 }
 
 #[test]
@@ -146,7 +154,8 @@ fn codex_fork_skips_replayed_parent_turns() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rollout-fork.jsonl");
     let mut text = String::new();
-    text += r#"{"timestamp":"2026-10-01T11:00:00Z","type":"session_meta","payload":{"id":"01a00000-0000-7000-8000-000000000500","forked_from_id":"01a00000-0000-7000-8000-000000000001","cwd":"/work/app"}}"#;
+    // A subagent identified only by nested spawn metadata.
+    text += r#"{"timestamp":"2026-10-01T11:00:00Z","type":"session_meta","payload":{"id":"01a00000-0500-7fff-8000-000000000000","cwd":"/work/app","source":{"subagent":{"thread_spawn":{"parent_thread_id":"01a00000-0000-7000-8000-000000000001"}}}}}"#;
     text += "\n";
     // Parent history, replayed with its original (older) ids.
     text += r#"{"timestamp":"2026-10-01T11:00:00Z","type":"session_meta","payload":{"id":"01a00000-0000-7000-8000-000000000001"}}"#;
@@ -154,20 +163,24 @@ fn codex_fork_skips_replayed_parent_turns() {
     text += r#"{"timestamp":"2026-10-01T11:00:00Z","type":"turn_context","payload":{"turn_id":"01a00000-0000-7000-8000-000000000002","model":"gpt-6.1-sol"}}"#;
     text += "\n";
     text += &codex_count("2026-10-01T11:00:00Z", 5000, 4000, 0, 1000, 0);
-    // The fork's own turn.
-    text += r#"{"timestamp":"2026-10-01T11:00:01Z","type":"turn_context","payload":{"turn_id":"01a00000-0000-7000-8000-000000000501","model":"gpt-6-luna"}}"#;
+    // The fork's own turn, created in the same millisecond as the fork but
+    // with lower random bits.
+    text += r#"{"timestamp":"2026-10-01T11:00:01Z","type":"turn_context","payload":{"turn_id":"01a00000-0500-7000-8000-000000000000","model":"gpt-6-luna"}}"#;
     text += "\n";
+    // The inherited total reported again before the first request.
+    text += &codex_count("2026-10-01T11:00:01Z", 5000, 4000, 0, 1000, 0);
     text += &codex_count("2026-10-01T11:00:02Z", 5500, 450, 0, 50, 0);
     write(&path, &text);
 
     let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
-    assert_eq!(session.id, "01a00000-0000-7000-8000-000000000500");
+    assert_eq!(session.id, "01a00000-0500-7fff-8000-000000000000");
     assert_eq!(session.events.len(), 1);
     assert_eq!(session.events[0].tokens.total(), 500);
     assert_eq!(
         session.models[session.events[0].model as usize],
         "gpt-6-luna"
     );
+    assert!(session.events[0].key.is_some());
 }
 
 fn varint(out: &mut Vec<u8>, mut value: u64) {
@@ -251,6 +264,12 @@ fn antigravity_reads_generation_metadata() {
         .unwrap();
     }
     drop(conn);
+
+    // A database locked by its writer is an error, not an empty session.
+    let writer = rusqlite::Connection::open(&path).unwrap();
+    writer.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    assert!(parse::parse_full(Tool::Antigravity, &path).is_err());
+    drop(writer);
 
     let (session, cursor) = parse::parse_full(Tool::Antigravity, &path).unwrap();
     assert!(cursor.is_none());

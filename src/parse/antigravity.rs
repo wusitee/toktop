@@ -42,26 +42,48 @@ pub fn parse(path: &Path) -> io::Result<Session> {
         ..Session::default()
     };
 
+    // Locking and read errors propagate so the caller keeps its previous
+    // snapshot; only a database without these tables is legitimately empty.
+    let tables: Vec<String> = conn
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .and_then(|mut stmt| stmt.query_map([], |row| row.get(0))?.collect())
+        .map_err(to_io)?;
+    let has = |name: &str| tables.iter().any(|table| table == name);
+    if !has("gen_metadata") {
+        return Ok(session);
+    }
+
     let mut created_ms = None;
-    if let Ok(blob) = conn.query_row(
-        "SELECT data FROM trajectory_metadata_blob LIMIT 1",
-        [],
-        |row| row.get::<_, Vec<u8>>(0),
-    ) {
-        session.project = proto::bytes(&blob, 1)
-            .and_then(|folder| proto::string(folder, 1))
-            .map(uri_to_path);
-        created_ms = proto::bytes(&blob, 2).and_then(proto::timestamp_ms);
+    if has("trajectory_metadata_blob") {
+        let blob = conn
+            .query_row(
+                "SELECT data FROM trajectory_metadata_blob LIMIT 1",
+                [],
+                |row| row.get::<_, Option<Vec<u8>>>(0),
+            )
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                error => Err(error),
+            })
+            .map_err(to_io)?;
+        if let Some(blob) = blob {
+            session.project = proto::bytes(&blob, 1)
+                .and_then(|folder| proto::string(folder, 1))
+                .map(uri_to_path);
+            created_ms = proto::bytes(&blob, 2).and_then(proto::timestamp_ms);
+        }
     }
     let fallback_ms = created_ms.or_else(|| mtime_ms(path)).unwrap_or(0);
 
-    let step_times = step_timestamps(&conn).unwrap_or_default();
-
-    let mut stmt = match conn.prepare("SELECT data FROM gen_metadata ORDER BY idx") {
-        Ok(stmt) => stmt,
-        // Not a generation database.
-        Err(_) => return Ok(session),
+    let step_times = if has("steps") {
+        step_timestamps(&conn).map_err(to_io)?
+    } else {
+        HashMap::new()
     };
+
+    let mut stmt = conn
+        .prepare("SELECT data FROM gen_metadata ORDER BY idx")
+        .map_err(to_io)?;
     let rows = stmt
         .query_map([], |row| row.get::<_, Vec<u8>>(0))
         .map_err(to_io)?;
@@ -76,7 +98,9 @@ pub fn parse(path: &Path) -> io::Result<Session> {
         };
 
         let tokens = Tokens {
-            input: proto::varint(usage, 1).unwrap_or(0) + proto::varint(usage, 2).unwrap_or(0),
+            input: proto::varint(usage, 1)
+                .unwrap_or(0)
+                .saturating_add(proto::varint(usage, 2).unwrap_or(0)),
             output: proto::varint(usage, 9).unwrap_or(0),
             cache_read: proto::varint(usage, 5).unwrap_or(0),
             cache_write: 0,

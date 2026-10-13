@@ -97,6 +97,6 @@ pub fn string(buf: &[u8], field: u64) -> Option<&str> {
 /// `google.protobuf.Timestamp` message to epoch milliseconds.
 pub fn timestamp_ms(buf: &[u8]) -> Option<i64> {
     let seconds = i64::try_from(varint(buf, 1)?).ok()?;
-    let nanos = varint(buf, 2).unwrap_or(0) as i64;
-    Some(seconds * 1000 + nanos / 1_000_000)
+    let nanos = i64::try_from(varint(buf, 2).unwrap_or(0)).ok()?;
+    seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
 }

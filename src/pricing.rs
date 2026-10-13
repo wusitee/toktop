@@ -34,23 +34,41 @@ pub struct Tier {
     pub input: f64,
     pub output: f64,
     pub cache_read: Option<f64>,
+    #[serde(default)]
+    pub cache_write: Option<f64>,
+    #[serde(default)]
+    pub cache_write_1h: Option<f64>,
 }
 
 impl Price {
     /// Cost in USD of one request.
     pub fn cost(&self, tokens: &Tokens) -> f64 {
-        let prompt = tokens.input + tokens.cache_read + tokens.cache_write;
-        let (input, output, cache_read) = match self.tier {
-            Some(tier) if prompt > tier.threshold => {
-                (tier.input, tier.output, tier.cache_read.or(self.cache_read))
-            }
-            _ => (self.input, self.output, self.cache_read),
+        let prompt = tokens
+            .input
+            .saturating_add(tokens.cache_read)
+            .saturating_add(tokens.cache_write);
+        // Tier rates the table omits fall back to the base rate of that kind.
+        let (input, output, cache_read, cache_write, cache_write_1h) = match self.tier {
+            Some(tier) if prompt > tier.threshold => (
+                tier.input,
+                tier.output,
+                tier.cache_read.or(self.cache_read),
+                tier.cache_write.or(self.cache_write),
+                tier.cache_write_1h.or(self.cache_write_1h),
+            ),
+            _ => (
+                self.input,
+                self.output,
+                self.cache_read,
+                self.cache_write,
+                self.cache_write_1h,
+            ),
         };
-        let cache_write_5m = self.cache_write.unwrap_or(input);
-        let cache_write_1h = self.cache_write_1h.unwrap_or(cache_write_5m);
+        let cache_write_5m = cache_write.unwrap_or(input);
+        let cache_write_1h = cache_write_1h.unwrap_or(cache_write_5m);
         let long_writes = tokens.cache_write_1h.min(tokens.cache_write);
         tokens.input as f64 * input
-            + (tokens.output + tokens.reasoning) as f64 * output
+            + tokens.output.saturating_add(tokens.reasoning) as f64 * output
             + tokens.cache_read as f64 * cache_read.unwrap_or(input)
             + (tokens.cache_write - long_writes) as f64 * cache_write_5m
             + long_writes as f64 * cache_write_1h
@@ -125,6 +143,10 @@ impl PriceTable {
     /// trailing `-segments` are dropped until a match is found.
     pub fn lookup(&self, model: &str) -> Option<&Price> {
         let mut name = model.trim().to_ascii_lowercase();
+        // A provider-qualified id names its own price.
+        if let Some(price) = self.prices.get(&name) {
+            return Some(price);
+        }
         if let Some(stripped) = name.rsplit('/').next() {
             name = stripped.to_owned();
         }
@@ -166,15 +188,21 @@ impl PriceTable {
                 {
                     return None;
                 }
-                let tier =
-                    |input: Option<f64>, output: Option<f64>, cache: Option<f64>, at: u64| {
-                        Some(Tier {
-                            threshold: at,
-                            input: input?,
-                            output: output?,
-                            cache_read: cache,
-                        })
-                    };
+                let tier = |threshold: u64,
+                            input: Option<f64>,
+                            output: Option<f64>,
+                            cache_read: Option<f64>,
+                            cache_write: Option<f64>,
+                            cache_write_1h: Option<f64>| {
+                    Some(Tier {
+                        threshold,
+                        input: input?,
+                        output: output?,
+                        cache_read,
+                        cache_write,
+                        cache_write_1h,
+                    })
+                };
                 let price = Price {
                     input: entry.input_cost_per_token?,
                     output: entry.output_cost_per_token?,
@@ -182,17 +210,21 @@ impl PriceTable {
                     cache_write: entry.cache_creation_input_token_cost,
                     cache_write_1h: entry.cache_creation_input_token_cost_above_1hr,
                     tier: tier(
+                        200_000,
                         entry.input_cost_per_token_above_200k_tokens,
                         entry.output_cost_per_token_above_200k_tokens,
                         entry.cache_read_input_token_cost_above_200k_tokens,
-                        200_000,
+                        entry.cache_creation_input_token_cost_above_200k_tokens,
+                        entry.cache_creation_input_token_cost_above_1hr_above_200k_tokens,
                     )
                     .or_else(|| {
                         tier(
+                            272_000,
                             entry.input_cost_per_token_above_272k_tokens,
                             entry.output_cost_per_token_above_272k_tokens,
                             entry.cache_read_input_token_cost_above_272k_tokens,
-                            272_000,
+                            entry.cache_creation_input_token_cost_above_272k_tokens,
+                            None,
                         )
                     }),
                 };
@@ -245,11 +277,17 @@ struct RawEntry {
     #[serde(default, deserialize_with = "lenient_f64")]
     cache_read_input_token_cost_above_200k_tokens: Option<f64>,
     #[serde(default, deserialize_with = "lenient_f64")]
+    cache_creation_input_token_cost_above_200k_tokens: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    cache_creation_input_token_cost_above_1hr_above_200k_tokens: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
     input_cost_per_token_above_272k_tokens: Option<f64>,
     #[serde(default, deserialize_with = "lenient_f64")]
     output_cost_per_token_above_272k_tokens: Option<f64>,
     #[serde(default, deserialize_with = "lenient_f64")]
     cache_read_input_token_cost_above_272k_tokens: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    cache_creation_input_token_cost_above_272k_tokens: Option<f64>,
 }
 
 /// The table mixes numbers with strings and documentation placeholders;

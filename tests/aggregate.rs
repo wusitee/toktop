@@ -22,8 +22,10 @@ const LITELLM: &str = r#"{
 fn litellm_table_resolves_tool_model_ids() {
     let table = PriceTable::from_litellm(LITELLM.as_bytes()).unwrap();
     assert!(table.lookup("text-embedding-x").is_none());
-    // First-party provider entries win over resellers for bare names.
+    // First-party provider entries win over resellers for bare names, but a
+    // provider-qualified id keeps its own price.
     assert_eq!(table.lookup("gpt-6.1-sol").unwrap().input, 2e-06);
+    assert_eq!(table.lookup("azure/gpt-6.1-sol").unwrap().input, 9e-06);
     // Effort and variant suffixes fall back to the catalog name.
     assert_eq!(
         table.lookup("claude-opus-5-5-thinking").unwrap().input,
@@ -46,6 +48,8 @@ fn cost_applies_cache_and_long_context_rates() {
             input: 8e-06,
             output: 4e-05,
             cache_read: None,
+            cache_write: Some(1e-05),
+            cache_write_1h: None,
         }),
     };
     let tokens = Tokens {
@@ -59,11 +63,15 @@ fn cost_applies_cache_and_long_context_rates() {
     let expected = 100.0 * 4e-06 + 15.0 * 2e-05 + 500.0 * 2e-07 + 200.0 * 5e-06 + 100.0 * 8e-06;
     assert!((price.cost(&tokens) - expected).abs() < 1e-12);
 
+    // Above the threshold, tier rates apply; missing ones fall back to base rates.
     let long = Tokens {
         input: 2000,
+        cache_write: 300,
+        cache_write_1h: 100,
         ..Tokens::default()
     };
-    assert!((price.cost(&long) - 2000.0 * 8e-06).abs() < 1e-12);
+    let expected = 2000.0 * 8e-06 + 200.0 * 1e-05 + 100.0 * 8e-06;
+    assert!((price.cost(&long) - expected).abs() < 1e-12);
 }
 
 fn ms(date: NaiveDate, hour: u32) -> i64 {
@@ -114,17 +122,16 @@ fn summary_filters_by_period_and_dedups_across_files() {
             vec![(ms(today, 9), 100, Some("m1")), (ms(monday, 9), 20, None)],
         ),
     );
-    // A resumed copy of the same response in another file.
-    store.insert_session(
-        "/b.jsonl".into(),
-        Tool::ClaudeCode,
-        session(
-            "b",
-            "/work/other",
-            "claude-opus-5-5",
-            vec![(ms(today, 9), 100, Some("m1"))],
-        ),
+    // A resumed copy of the same response in another file, with more
+    // complete counts: counted once, at the most complete values.
+    let mut resumed = session(
+        "b",
+        "/work/other",
+        "claude-opus-5-5",
+        vec![(ms(today, 9), 100, Some("m1"))],
     );
+    resumed.events[0].tokens.output = 50;
+    store.insert_session("/b.jsonl".into(), Tool::ClaudeCode, resumed);
     store.insert_session(
         "/c.jsonl".into(),
         Tool::Codex,
@@ -147,6 +154,7 @@ fn summary_filters_by_period_and_dedups_across_files() {
 
     let today_summary = aggregate::summarize(&store, &prices, Period::Today, now);
     assert_eq!(today_summary.total.tokens.input, 103);
+    assert_eq!(today_summary.total.tokens.output, 50);
     assert!((today_summary.total.cost - 1.0).abs() < 1e-9);
     assert_eq!(today_summary.unpriced, ["gpt-6.1-sol"]);
     assert_eq!(today_summary.by_project[0].label, "app");

@@ -13,8 +13,34 @@ pub struct FileEntry {
     pub tool: Tool,
     pub session: Session,
     cursor: Option<Cursor>,
+    stamp: Option<Stamp>,
+}
+
+/// File identity and version. SQLite commits land in the `-wal` sidecar
+/// without touching the main file, so its metadata is part of the stamp.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    inode: u64,
     size: u64,
     modified: Option<SystemTime>,
+    wal: Option<(u64, Option<SystemTime>)>,
+}
+
+impl Stamp {
+    fn read(path: &Path) -> Option<Stamp> {
+        let meta = fs::metadata(path).ok()?;
+        let mut wal_path = path.as_os_str().to_owned();
+        wal_path.push("-wal");
+        let wal = fs::metadata(PathBuf::from(wal_path))
+            .ok()
+            .map(|wal| (wal.len(), wal.modified().ok()));
+        Some(Stamp {
+            inode: parse::inode(&meta),
+            size: meta.len(),
+            modified: meta.modified().ok(),
+            wal,
+        })
+    }
 }
 
 #[derive(Default)]
@@ -80,10 +106,16 @@ impl Store {
                 tool,
                 session,
                 cursor: None,
-                size: 0,
-                modified: None,
+                stamp: None,
             },
         );
+    }
+
+    /// Parses `path` and tracks it, even outside the discovered roots.
+    pub fn track(&mut self, path: PathBuf, tool: Tool) -> io::Result<()> {
+        let entry = read_file(tool, &path)?;
+        self.files.insert(path, entry);
+        Ok(())
     }
 
     /// Every source file currently on disk.
@@ -160,10 +192,7 @@ impl Store {
         let Some(entry) = self.files.get(path) else {
             return true;
         };
-        let Ok(meta) = fs::metadata(path) else {
-            return true;
-        };
-        meta.len() != entry.size || meta.modified().ok() != entry.modified
+        entry.stamp.is_none() || Stamp::read(path) != entry.stamp
     }
 
     /// Re-reads the given files, consuming only appended bytes where possible.
@@ -173,7 +202,8 @@ impl Store {
         let mut titles_dirty = false;
         for path in paths {
             let path = source_path(&path);
-            let Some(tool) = classify(&path) else {
+            let known = self.files.get(&path).map(|entry| entry.tool);
+            let Some(tool) = classify(&path).or(known) else {
                 titles_dirty |= is_title_source(&path);
                 continue;
             };
@@ -188,12 +218,15 @@ impl Store {
             changed = true;
             if let Some(entry) = self.files.get_mut(&path) {
                 if let Some(cursor) = entry.cursor.as_mut() {
-                    if let Ok(true) = parse::parse_appended(&path, &mut entry.session, cursor) {
-                        if let Ok(meta) = fs::metadata(&path) {
-                            entry.size = meta.len();
-                            entry.modified = meta.modified().ok();
+                    let stamp = Stamp::read(&path);
+                    let same_file = stamp.zip(entry.stamp).is_some_and(|(now, before)| {
+                        now.inode == before.inode && now.size >= before.size
+                    });
+                    if same_file {
+                        if let Ok(true) = parse::parse_appended(&path, &mut entry.session, cursor) {
+                            entry.stamp = stamp;
+                            continue;
                         }
-                        continue;
                     }
                 }
             }
@@ -230,14 +263,14 @@ fn is_title_source(path: &Path) -> bool {
 }
 
 fn read_file(tool: Tool, path: &Path) -> io::Result<FileEntry> {
-    let meta = fs::metadata(path)?;
+    // Stamp first: a write racing the parse makes the entry stale, not lost.
+    let stamp = Stamp::read(path);
     let (session, cursor) = parse::parse_full(tool, path)?;
     Ok(FileEntry {
         tool,
         session,
         cursor,
-        size: meta.len(),
-        modified: meta.modified().ok(),
+        stamp,
     })
 }
 

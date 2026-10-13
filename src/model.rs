@@ -47,7 +47,11 @@ fn is_zero(value: &u64) -> bool {
 
 impl Tokens {
     pub fn total(&self) -> u64 {
-        self.input + self.output + self.cache_read + self.cache_write + self.reasoning
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+            .saturating_add(self.reasoning)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -66,19 +70,22 @@ impl Tokens {
 
     /// Share of all prompt tokens that were served from cache.
     pub fn cache_hit_rate(&self) -> Option<f64> {
-        let prompt = self.input + self.cache_read + self.cache_write;
+        let prompt = self
+            .input
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write);
         (prompt > 0).then(|| self.cache_read as f64 / prompt as f64)
     }
 }
 
 impl AddAssign<&Tokens> for Tokens {
     fn add_assign(&mut self, rhs: &Tokens) {
-        self.input += rhs.input;
-        self.output += rhs.output;
-        self.cache_read += rhs.cache_read;
-        self.cache_write += rhs.cache_write;
-        self.cache_write_1h += rhs.cache_write_1h;
-        self.reasoning += rhs.reasoning;
+        self.input = self.input.saturating_add(rhs.input);
+        self.output = self.output.saturating_add(rhs.output);
+        self.cache_read = self.cache_read.saturating_add(rhs.cache_read);
+        self.cache_write = self.cache_write.saturating_add(rhs.cache_write);
+        self.cache_write_1h = self.cache_write_1h.saturating_add(rhs.cache_write_1h);
+        self.reasoning = self.reasoning.saturating_add(rhs.reasoning);
     }
 }
 

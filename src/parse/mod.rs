@@ -99,12 +99,12 @@ fn read_lines(path: &Path, session: &mut Session, cursor: &mut Cursor) -> io::Re
 }
 
 #[cfg(unix)]
-fn inode(meta: &std::fs::Metadata) -> u64 {
+pub(crate) fn inode(meta: &std::fs::Metadata) -> u64 {
     std::os::unix::fs::MetadataExt::ino(meta)
 }
 
 #[cfg(not(unix))]
-fn inode(_meta: &std::fs::Metadata) -> u64 {
+pub(crate) fn inode(_meta: &std::fs::Metadata) -> u64 {
     0
 }
 

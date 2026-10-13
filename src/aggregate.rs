@@ -160,24 +160,41 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
     let mut daily: HashMap<NaiveDate, Usage> = HashMap::new();
     let mut unpriced: HashSet<String> = HashSet::new();
     let mut price_cache: HashMap<&str, Option<Price>> = HashMap::new();
-    let mut seen_keys: HashSet<(Tool, &str)> = HashSet::new();
     let mut recent_tokens = 0u64;
 
     // Iterate in a stable order so cross-file duplicates always resolve to the
-    // same (earliest-modified) file.
+    // same file.
     let mut files: Vec<_> = store.files.iter().collect();
     files.sort_by(|a, b| a.0.cmp(b.0));
+
+    // A response copied into several files (resumed or forked sessions) is
+    // counted once, at its first copy, with the most complete counts seen.
+    let mut merged: HashMap<(Tool, &str), Tokens> = HashMap::new();
+    for (_, entry) in &files {
+        for event in &entry.session.events {
+            if let Some(key) = event.key.as_deref() {
+                merged
+                    .entry((entry.tool, key))
+                    .and_modify(|tokens| tokens.max_merge(&event.tokens))
+                    .or_insert(event.tokens);
+            }
+        }
+    }
 
     for (_, entry) in files {
         let session = &entry.session;
         let mut session_usage = Usage::default();
         let mut last_activity = i64::MIN;
         for event in &session.events {
-            if let Some(key) = event.key.as_deref() {
-                if !seen_keys.insert((entry.tool, key)) {
-                    continue;
-                }
-            }
+            let tokens = match event.key.as_deref() {
+                // `remove` makes later copies miss and be skipped.
+                Some(key) => match merged.remove(&(entry.tool, key)) {
+                    Some(tokens) => tokens,
+                    None => continue,
+                },
+                None => event.tokens,
+            };
+
             let model = session
                 .models
                 .get(event.model as usize)
@@ -185,14 +202,14 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
             let price = *price_cache
                 .entry(model)
                 .or_insert_with(|| prices.lookup(model).copied());
-            let cost = price.map_or(0.0, |price| price.cost(&event.tokens));
+            let cost = price.map_or(0.0, |price| price.cost(&tokens));
 
             daily
                 .entry(local_date(event.ts))
                 .or_default()
-                .add(&event.tokens, cost);
+                .add(&tokens, cost);
             if now_ms - event.ts <= RATE_WINDOW_MS && event.ts <= now_ms {
-                recent_tokens += event.tokens.total();
+                recent_tokens += tokens.total();
             }
             if event.ts < start_ms {
                 continue;
@@ -200,22 +217,19 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
             if price.is_none() && !prices.is_empty() {
                 unpriced.insert(model.to_owned());
             }
-            summary.total.add(&event.tokens, cost);
-            by_tool
-                .entry(entry.tool)
-                .or_default()
-                .add(&event.tokens, cost);
+            summary.total.add(&tokens, cost);
+            by_tool.entry(entry.tool).or_default().add(&tokens, cost);
             by_model
                 .entry(model.to_owned())
                 .or_default()
-                .add(&event.tokens, cost);
+                .add(&tokens, cost);
             if let Some(project) = &session.project {
                 by_project
                     .entry(project_label(project))
                     .or_default()
-                    .add(&event.tokens, cost);
+                    .add(&tokens, cost);
             }
-            session_usage.add(&event.tokens, cost);
+            session_usage.add(&tokens, cost);
             last_activity = last_activity.max(event.ts);
         }
 
