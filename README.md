@@ -28,6 +28,8 @@ install -Dm644 data/io.github.wusitee.toktop.desktop ~/.local/share/applications
 
 Run `toktop` to open the window. Pick the period from the header menu. The Overview page shows totals, per-tool usage, Codex rate limits and a 30-day chart; Models, Projects and Sessions break usage down further. Expand a row for its input, output, reasoning and cache split.
 
+Costs use a cached price list that refreshes daily. If no prices are available, costs show “—” with a warning in the window, and “cost unavailable” in printed summaries; token counts remain available.
+
 Print a summary without the GUI:
 
 ```sh

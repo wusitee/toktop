@@ -64,12 +64,19 @@ fn print(period: Option<&str>) {
     store.sync_all();
     let summary = aggregate::summarize(&store, &prices, period, toktop::now_ms());
 
+    let cost = |value| {
+        if summary.prices_available {
+            format::cost(value)
+        } else {
+            "cost unavailable".to_owned()
+        }
+    };
     let total = &summary.total;
     println!(
         "{}: {} tokens, {}, {} requests",
         period.label(),
         format::tokens(total.tokens.total()),
-        format::cost(total.cost),
+        cost(total.cost),
         total.requests
     );
     println!("\nBy tool");
@@ -78,7 +85,7 @@ fn print(period: Option<&str>) {
             "  {:<14} {:>8}  {:>9}",
             tool.label(),
             format::tokens(usage.tokens.total()),
-            format::cost(usage.cost)
+            cost(usage.cost)
         );
     }
     for (title, rows) in [
@@ -91,7 +98,7 @@ fn print(period: Option<&str>) {
                 "  {:<28} {:>8}  {:>9}",
                 row.label,
                 format::tokens(row.usage.tokens.total()),
-                format::cost(row.usage.cost)
+                cost(row.usage.cost)
             );
         }
     }

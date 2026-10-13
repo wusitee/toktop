@@ -153,10 +153,7 @@ impl Store {
             .filter(|(path, _)| self.is_stale(path))
             .collect();
         if pending.is_empty() {
-            if changed {
-                self.reload_titles();
-            }
-            return changed;
+            return self.reload_titles() || changed;
         }
         let threads = std::thread::available_parallelism()
             .map_or(2, |n| n.get())

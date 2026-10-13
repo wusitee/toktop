@@ -10,7 +10,7 @@ use toktop::format;
 pub struct Day {
     pub date: NaiveDate,
     pub tokens: u64,
-    pub cost: f64,
+    pub cost: Option<f64>,
 }
 
 pub struct Chart {
@@ -49,7 +49,7 @@ impl Chart {
                 "{}\n{} tokens · {}",
                 day.date.format("%a %b %-d"),
                 format::tokens(day.tokens),
-                format::cost(day.cost)
+                day.cost.map_or_else(|| "—".to_owned(), format::cost)
             )));
             true
         });

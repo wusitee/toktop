@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 pub enum Msg {
     Changed(Vec<PathBuf>),
     Rescan,
+    WatchCoverage(bool),
     Period(Period),
     Prices(PriceTable),
 }
@@ -30,28 +31,12 @@ const POLL: Duration = Duration::from_secs(10);
 const PRICE_RETRY: Duration = Duration::from_secs(60 * 60);
 
 /// Starts the worker. `emit` runs on the worker thread whenever the summary
-/// for the selected period changes.
+/// for the selected period changes, and on every clock tick.
 pub fn spawn(
     period: Period,
     emit: impl FnMut(Summary) + Send + 'static,
 ) -> io::Result<Sender<Msg>> {
     let (tx, rx) = mpsc::channel();
-    let mut roots: Vec<PathBuf> = Tool::ALL
-        .into_iter()
-        .flat_map(paths::source_roots)
-        .collect();
-    roots.sort();
-    roots.dedup();
-    let watch_tx = tx.clone();
-    let watching = watch::spawn(roots, paths::title_sources(), move |change| {
-        let _ = watch_tx.send(match change {
-            watch::Change::Paths(paths) => Msg::Changed(paths),
-            watch::Change::Rescan => Msg::Rescan,
-        });
-    });
-    if let Err(error) = &watching {
-        eprintln!("toktop: file watching unavailable ({error}); polling every {POLL:?}");
-    }
     let state = State {
         store: Store::default(),
         prices: PriceTable::default(),
@@ -62,7 +47,7 @@ pub fn spawn(
     let fetch_tx = tx.clone();
     std::thread::Builder::new()
         .name("toktop-worker".into())
-        .spawn(move || state.run(rx, fetch_tx, watching.is_ok()))?;
+        .spawn(move || state.run(rx, fetch_tx))?;
     Ok(tx)
 }
 
@@ -90,19 +75,39 @@ struct State<E> {
 }
 
 impl<E: FnMut(Summary)> State<E> {
-    fn publish(&mut self) {
+    fn publish(&mut self, tick: bool) {
         let summary = aggregate::summarize(&self.store, &self.prices, self.period, crate::now_ms());
-        if self.last.as_ref() != Some(&summary) {
+        if tick || self.last.as_ref() != Some(&summary) {
             self.last = Some(summary.clone());
             (self.emit)(summary);
         }
     }
 
-    fn run(mut self, rx: mpsc::Receiver<Msg>, tx: Sender<Msg>, watching: bool) {
+    fn run(mut self, rx: mpsc::Receiver<Msg>, tx: Sender<Msg>) {
+        let mut roots: Vec<PathBuf> = Tool::ALL
+            .into_iter()
+            .flat_map(paths::source_roots)
+            .collect();
+        roots.sort();
+        roots.dedup();
+        let watch_tx = tx.clone();
+        // Watch before scanning so writes during the scan are queued.
+        let watcher = watch::spawn(roots, paths::title_sources(), move |change| {
+            let _ = watch_tx.send(match change {
+                watch::Change::Paths(paths) => Msg::Changed(paths),
+                watch::Change::Rescan => Msg::Rescan,
+                watch::Change::Coverage(complete) => Msg::WatchCoverage(complete),
+            });
+        });
+        if let Err(error) = &watcher {
+            eprintln!("toktop: file watching unavailable ({error}); polling every {POLL:?}");
+        }
+        // Coverage is reported by the watcher after registration.
+        let mut watching = false;
         let (prices, stale) = crate::cached_prices();
         self.prices = prices;
         self.store.sync_all();
-        self.publish();
+        self.publish(false);
         trim_heap();
 
         let mut next_price_fetch = Some(if stale {
@@ -152,14 +157,15 @@ impl<E: FnMut(Summary)> State<E> {
                     last_change = Instant::now();
                     first_change.get_or_insert(last_change);
                 }
+                Ok(Msg::WatchCoverage(complete)) => watching = complete,
                 Ok(Msg::Period(period)) => {
                     self.period = period;
-                    self.publish();
+                    self.publish(false);
                 }
                 Ok(Msg::Prices(table)) => {
                     self.prices = table;
                     next_price_fetch = Some(Instant::now() + crate::pricing::MAX_AGE);
-                    self.publish();
+                    self.publish(false);
                     trim_heap();
                 }
                 Err(RecvTimeoutError::Timeout) => {}
@@ -173,6 +179,9 @@ impl<E: FnMut(Summary)> State<E> {
                 first_change = None;
                 let changed = if std::mem::take(&mut rescan) {
                     pending.clear();
+                    if let Ok(watcher) = &watcher {
+                        watcher.reconcile();
+                    }
                     let changed = self.store.sync_all();
                     trim_heap();
                     changed
@@ -180,19 +189,45 @@ impl<E: FnMut(Summary)> State<E> {
                     self.store.update(pending.drain())
                 };
                 if changed {
-                    self.publish();
+                    self.publish(false);
                 }
             }
             if !watching && now >= next_poll {
                 next_poll = now + POLL;
+                if let Ok(watcher) = &watcher {
+                    watcher.reconcile();
+                }
                 if self.store.sync_all() {
-                    self.publish();
+                    self.publish(false);
                 }
             }
             if now >= next_tick {
                 next_tick = now + TICK;
-                self.publish();
+                self.publish(true);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_summary_is_published_on_clock_tick() {
+        let mut published = Vec::new();
+        let mut state = State {
+            store: Store::default(),
+            prices: PriceTable::default(),
+            period: Period::AllTime,
+            last: None,
+            emit: |summary| published.push(summary),
+        };
+        state.publish(false);
+        state.publish(false);
+        state.publish(true);
+        drop(state);
+        assert_eq!(published.len(), 2);
+        assert_eq!(published[0], published[1]);
     }
 }

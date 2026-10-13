@@ -1,22 +1,21 @@
-//! Recursive inotify watcher over the tools' source roots.
-//!
-//! Only content and directory changes are subscribed to (not opens or reads),
-//! so the thread sleeps while no tool is writing. Roots that do not exist yet
-//! are picked up when they are created: their nearest existing ancestor is
-//! watched for new directories. Single files outside the roots (title
-//! indexes) are watched through their parent directory.
+//! Recursive inotify watcher over source roots and external title indexes.
+//! Missing directories are watched through their nearest existing ancestor.
 
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 use std::collections::HashMap;
 use std::fs;
-use std::io;
+use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
 
 pub enum Change {
-    /// Files that were written, created, moved or deleted.
     Paths(Vec<PathBuf>),
-    /// Events were lost or a watched directory vanished; resync everything.
+    /// Events were lost or directory paths changed; resync everything.
     Rescan,
+    /// Whether every required directory could be watched.
+    Coverage(bool),
 }
 
 const TREE_MASK: WatchMask = WatchMask::MODIFY
@@ -26,53 +25,77 @@ const TREE_MASK: WatchMask = WatchMask::MODIFY
     .union(WatchMask::MOVED_TO)
     .union(WatchMask::DELETE_SELF)
     .union(WatchMask::MOVE_SELF)
-    .union(WatchMask::ONLYDIR);
+    .union(WatchMask::ONLYDIR)
+    .union(WatchMask::MASK_ADD);
 
-// MASK_ADD: an ancestor and a file's parent can be the same directory.
 const ANCESTOR_MASK: WatchMask = WatchMask::CREATE
+    .union(WatchMask::MOVED_FROM)
     .union(WatchMask::MOVED_TO)
     .union(WatchMask::DELETE_SELF)
+    .union(WatchMask::MOVE_SELF)
     .union(WatchMask::ONLYDIR)
     .union(WatchMask::MASK_ADD);
 
-const FILE_MASK: WatchMask = WatchMask::MODIFY
-    .union(WatchMask::CREATE)
-    .union(WatchMask::MOVED_TO)
-    .union(WatchMask::ONLYDIR)
-    .union(WatchMask::MASK_ADD);
+const FILE_MASK: WatchMask = TREE_MASK;
+
+/// Requests registration retries without blocking the worker on traversal.
+pub struct Handle {
+    control: UnixStream,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Handle {
+    /// Re-walks roots, as on queue overflow, adding any missing watches.
+    pub fn reconcile(&self) {
+        let _ = (&self.control).write_all(b"R");
+    }
+}
+
+impl Drop for Handle {
+    fn drop(&mut self) {
+        let _ = (&self.control).write_all(b"S");
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
 
 struct Watcher {
     inotify: Inotify,
     dirs: HashMap<WatchDescriptor, PathBuf>,
     roots: Vec<PathBuf>,
     files: Vec<PathBuf>,
+    failure: Option<String>,
+    warned: bool,
 }
 
-/// Starts the watcher thread over `roots` (recursive) and `files`. `emit`
-/// is called from that thread.
+/// Registers watches before returning; callers must run this off the UI thread.
 pub fn spawn(
     roots: Vec<PathBuf>,
     files: Vec<PathBuf>,
     mut emit: impl FnMut(Change) + Send + 'static,
-) -> io::Result<()> {
+) -> io::Result<Handle> {
     let mut watcher = Watcher {
         inotify: Inotify::init()?,
         dirs: HashMap::new(),
         roots,
         files,
+        failure: None,
+        warned: false,
     };
-    for index in 0..watcher.roots.len() {
-        watcher.ensure_root(index);
-    }
-    for file in watcher.files.clone() {
-        if let Some(parent) = file.parent().filter(|dir| dir.is_dir()) {
-            watcher.add(parent, FILE_MASK);
-        }
-    }
-    std::thread::Builder::new()
+    // Do not report complete coverage until the thread starts successfully.
+    watcher.reconcile(&mut |_| {});
+    let (control, reader) = UnixStream::pair()?;
+    let thread = std::thread::Builder::new()
         .name("toktop-watch".into())
-        .spawn(move || watcher.run(&mut emit))?;
-    Ok(())
+        .spawn(move || {
+            watcher.coverage(&mut emit);
+            watcher.run(reader, &mut emit);
+        })?;
+    Ok(Handle {
+        control,
+        thread: Some(thread),
+    })
 }
 
 impl Watcher {
@@ -80,82 +103,185 @@ impl Watcher {
         self.roots.iter().any(|root| path.starts_with(root))
     }
 
-    /// Watches `roots[index]` recursively, or its nearest existing ancestor
-    /// until it appears. Returns files found under a newly watched root.
-    fn ensure_root(&mut self, index: usize) -> Vec<PathBuf> {
-        let root = self.roots[index].clone();
-        if root.is_dir() {
-            let mut files = Vec::new();
-            self.add_tree(&root, &mut files);
-            return files;
+    fn failed(&mut self, path: &Path, error: io::Error) {
+        if self.failure.is_none() {
+            let hint = if error.raw_os_error() == Some(28) {
+                "; check fs.inotify.max_user_watches"
+            } else {
+                ""
+            };
+            self.failure = Some(format!("{}: {error}{hint}", path.display()));
         }
-        let mut ancestor = root.parent();
-        while let Some(dir) = ancestor {
-            if dir.is_dir() {
-                if !self.in_root(dir) {
-                    self.add(dir, ANCESTOR_MASK);
-                }
-                break;
-            }
-            ancestor = dir.parent();
+    }
+
+    fn coverage(&mut self, emit: &mut impl FnMut(Change)) {
+        if let Some(reason) = &self.failure
+            && !self.warned
+        {
+            eprintln!("toktop: file watching degraded ({reason}); polling every 10s");
+            self.warned = true;
         }
-        Vec::new()
+        emit(Change::Coverage(self.failure.is_none()));
     }
 
     fn add(&mut self, dir: &Path, mask: WatchMask) {
-        if let Ok(wd) = self.inotify.watches().add(dir, mask) {
-            self.dirs.insert(wd, dir.to_path_buf());
+        match self.inotify.watches().add(dir, mask) {
+            Ok(wd) => {
+                self.dirs.insert(wd, dir.to_path_buf());
+            }
+            Err(error) => self.failed(dir, error),
         }
     }
 
-    fn add_tree(&mut self, dir: &Path, files: &mut Vec<PathBuf>) {
+    fn add_tree(&mut self, dir: &Path) {
         self.add(dir, TREE_MASK);
-        let Ok(entries) = fs::read_dir(dir) else {
-            return;
+        let entries = match fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                self.failed(dir, error);
+                return;
+            }
         };
-        for entry in entries.flatten() {
-            let path = entry.path();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    self.failed(dir, error);
+                    continue;
+                }
+            };
             match entry.file_type() {
-                Ok(kind) if kind.is_dir() => self.add_tree(&path, files),
-                Ok(kind) if kind.is_file() => files.push(path),
+                Ok(kind) if kind.is_dir() => self.add_tree(&entry.path()),
+                Err(error) => self.failed(&entry.path(), error),
                 _ => {}
             }
         }
     }
 
-    fn run(mut self, emit: &mut impl FnMut(Change)) {
+    fn ensure_dir(&mut self, path: &Path, tree: bool) {
+        let mut candidate = Some(path);
+        while let Some(dir) = candidate {
+            match fs::metadata(dir) {
+                Ok(meta) if meta.is_dir() => {
+                    if dir == path && tree {
+                        self.add_tree(dir);
+                    } else {
+                        self.add(
+                            dir,
+                            if dir == path {
+                                FILE_MASK
+                            } else {
+                                ANCESTOR_MASK
+                            },
+                        );
+                    }
+                    return;
+                }
+                Ok(_) => {
+                    self.failed(dir, io::Error::from(io::ErrorKind::NotADirectory));
+                    return;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    self.failed(dir, error);
+                    return;
+                }
+            }
+            candidate = dir.parent();
+        }
+    }
+
+    fn reconcile(&mut self, emit: &mut impl FnMut(Change)) {
+        self.failure = None;
+        for root in self.roots.clone() {
+            self.ensure_dir(&root, true);
+        }
+        for file in self.files.clone() {
+            if let Some(parent) = file.parent() {
+                self.ensure_dir(parent, false);
+            }
+        }
+        self.coverage(emit);
+    }
+
+    /// Inotify descriptors follow moved inodes; discard their old path mapping.
+    fn rebuild(&mut self, emit: &mut impl FnMut(Change)) {
+        for (wd, _) in self.dirs.drain() {
+            let _ = self.inotify.watches().remove(wd);
+        }
+        self.reconcile(emit);
+    }
+
+    fn run(mut self, mut control: UnixStream, emit: &mut impl FnMut(Change)) {
         let mut buffer = vec![0u8; 64 * 1024];
         loop {
-            let events = match self.inotify.read_events_blocking(&mut buffer) {
-                Ok(events) => events,
+            match wait_readable(self.inotify.as_raw_fd(), control.as_raw_fd()) {
+                Ok(true) => {
+                    let mut commands = [0; 64];
+                    match control.read(&mut commands) {
+                        Ok(0) | Err(_) => return,
+                        Ok(count) => {
+                            if commands[..count].contains(&b'S') {
+                                return;
+                            }
+                            self.reconcile(emit);
+                        }
+                    }
+                    continue;
+                }
+                Ok(false) => {}
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(_) => return,
+                Err(error) => {
+                    self.failed(Path::new("inotify"), error);
+                    self.coverage(emit);
+                    return;
+                }
+            }
+            let events = match self.inotify.read_events(&mut buffer) {
+                Ok(events) => events,
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    self.failed(Path::new("inotify"), error);
+                    self.coverage(emit);
+                    return;
+                }
             };
             let mut changed = Vec::new();
             let mut rescan = false;
-            let mut lost: Vec<WatchDescriptor> = Vec::new();
-            let mut created_dirs = Vec::new();
+            let mut rebuild = false;
             for event in events {
                 if event.mask.contains(EventMask::Q_OVERFLOW) {
                     rescan = true;
                     continue;
                 }
-                if event.mask.contains(EventMask::IGNORED) {
-                    lost.push(event.wd.clone());
-                    continue;
-                }
                 let Some(dir) = self.dirs.get(&event.wd) else {
                     continue;
                 };
+                // Self-events have no name and must be handled first.
+                if event
+                    .mask
+                    .intersects(EventMask::MOVE_SELF | EventMask::DELETE_SELF | EventMask::IGNORED)
+                {
+                    rebuild = true;
+                    continue;
+                }
                 let Some(name) = event.name else { continue };
                 let path = dir.join(name);
                 if event.mask.contains(EventMask::ISDIR) {
+                    // Ancestor watches also see unrelated sibling directories.
+                    if !self.in_root(&path)
+                        && !self.roots.iter().any(|root| root.starts_with(&path))
+                        && !self.files.iter().any(|file| file.starts_with(&path))
+                    {
+                        continue;
+                    }
                     if event
                         .mask
-                        .intersects(EventMask::CREATE | EventMask::MOVED_TO)
+                        .intersects(EventMask::MOVED_FROM | EventMask::MOVED_TO | EventMask::DELETE)
                     {
-                        created_dirs.push(path);
-                    } else if event.mask.contains(EventMask::MOVED_FROM) {
+                        rebuild = true;
+                    } else if event.mask.contains(EventMask::CREATE) {
                         rescan = true;
                     }
                 } else if self.in_root(dir)
@@ -164,41 +290,48 @@ impl Watcher {
                     changed.push(path);
                 }
             }
-
-            for path in created_dirs {
-                if self.in_root(&path) {
-                    self.add_tree(&path, &mut changed);
-                } else {
-                    for index in 0..self.roots.len() {
-                        if self.roots[index].starts_with(&path) {
-                            changed.extend(self.ensure_root(index));
-                        }
-                    }
-                }
+            if rebuild {
+                self.rebuild(emit);
+            } else if rescan {
+                // Includes overflow: recover directories whose CREATE was lost.
+                self.reconcile(emit);
             }
-            if !lost.is_empty() {
-                for wd in lost {
-                    self.dirs.remove(&wd);
-                }
-                // A watched directory was removed; fall back to its ancestors.
-                for index in 0..self.roots.len() {
-                    let root = self.roots[index].clone();
-                    if !self
-                        .dirs
-                        .values()
-                        .any(|dir| *dir == root || root.starts_with(dir))
-                    {
-                        changed.extend(self.ensure_root(index));
-                    }
-                }
-                rescan = true;
-            }
-
-            if rescan {
+            if rebuild || rescan {
                 emit(Change::Rescan);
             } else if !changed.is_empty() {
                 emit(Change::Paths(changed));
             }
         }
+    }
+}
+
+/// Blocks on inotify or worker commands, with no periodic wakeups while idle.
+fn wait_readable(inotify: i32, control: i32) -> io::Result<bool> {
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+    unsafe extern "C" {
+        fn poll(fds: *mut PollFd, nfds: usize, timeout: i32) -> i32;
+    }
+    let mut fds = [
+        PollFd {
+            fd: inotify,
+            events: 1,
+            revents: 0,
+        },
+        PollFd {
+            fd: control,
+            events: 1,
+            revents: 0,
+        },
+    ];
+    // SAFETY: fds contains nfds valid pollfd values for the duration of the call.
+    if unsafe { poll(fds.as_mut_ptr(), fds.len(), -1) } < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(fds[1].revents != 0)
     }
 }

@@ -93,6 +93,8 @@ pub struct DayRow {
 pub struct Summary {
     pub period: Period,
     pub total: Usage,
+    /// False when no price table is loaded; costs must be hidden.
+    pub prices_available: bool,
     pub by_tool: Vec<(Tool, Usage)>,
     pub by_model: Vec<Row>,
     pub by_project: Vec<Row>,
@@ -158,6 +160,7 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
 
     let mut summary = Summary {
         period,
+        prices_available: !prices.is_empty(),
         ..Summary::default()
     };
     let mut by_tool: HashMap<Tool, Usage> = HashMap::new();

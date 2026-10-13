@@ -21,14 +21,36 @@ const MAX_SESSIONS: usize = 100;
 pub fn run() -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(activate);
+    app.connect_shutdown(|_| debug_event("application shutdown"));
+    app.connect_name_lost(|_| {
+        debug_event("GApplication name-lost");
+        false
+    });
     let quit = gio::ActionEntry::builder("quit")
-        .activate(|app: &adw::Application, _, _| app.quit())
+        .activate(|app: &adw::Application, _, _| {
+            debug_event("app.quit activation");
+            app.quit();
+        })
         .build();
     app.add_action_entries([quit]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
     app.set_accels_for_action("window.close", &["<Control>w"]);
     // Command-line arguments are handled before GTK starts.
     app.run_with_args::<&str>(&[])
+}
+
+fn debug_event(event: &str) {
+    if std::env::var_os("TOKTOP_DEBUG").is_some() {
+        eprintln!("toktop: {} {event}", chrono::Utc::now().to_rfc3339());
+    }
+}
+
+fn display_cost(cost: f64, available: bool) -> String {
+    if available {
+        format::cost(cost)
+    } else {
+        "—".to_owned()
+    }
 }
 
 fn activate(app: &adw::Application) {
@@ -107,7 +129,7 @@ struct Ui {
     models: gtk::ListBox,
     projects: gtk::ListBox,
     sessions: gtk::ListBox,
-    /// Titles of expanded breakdown rows, kept across list rebuilds.
+    /// Stable keys of expanded breakdown rows, kept across list rebuilds.
     expanded: Rc<RefCell<HashSet<String>>>,
     /// Last rendered summary; lists are rebuilt only when their data changes.
     shown: RefCell<Option<Summary>>,
@@ -207,6 +229,11 @@ impl Ui {
             .content(&toolbar)
             .build();
 
+        window.connect_close_request(|_| {
+            debug_event("window close-request");
+            glib::Propagation::Proceed
+        });
+
         Ui {
             window,
             period,
@@ -239,7 +266,11 @@ impl Ui {
         let total = &summary.total;
         self.total
             .set_label(&format!("{} tokens", format::tokens(total.tokens.total())));
-        let mut detail = format!("{} · {} requests", format::cost(total.cost), total.requests);
+        let mut detail = format!(
+            "{} · {} requests",
+            display_cost(total.cost, summary.prices_available),
+            total.requests
+        );
         if let Some(rate) = total.tokens.cache_hit_rate() {
             detail.push_str(&format!(" · {} cached", format::percent(rate)));
         }
@@ -250,7 +281,11 @@ impl Ui {
             format::tokens(summary.rate_per_min as u64)
         ));
 
-        if summary.unpriced.is_empty() {
+        if !summary.prices_available {
+            self.banner
+                .set_title("Prices unavailable; costs hidden until the price list downloads");
+            self.banner.set_revealed(true);
+        } else if summary.unpriced.is_empty() {
             self.banner.set_revealed(false);
         } else {
             self.banner.set_title(&format!(
@@ -263,33 +298,47 @@ impl Ui {
         let previous = self.shown.replace(Some(summary.clone()));
         let previous = previous.as_ref();
         let total_tokens = total.tokens.total().max(1) as f64;
-        if previous.is_none_or(|before| before.by_tool != summary.by_tool) {
+        let context_changed = previous.is_none_or(|before| {
+            before.total.tokens.total() != total.tokens.total()
+                || before.prices_available != summary.prices_available
+        });
+        if context_changed || previous.is_none_or(|before| before.by_tool != summary.by_tool) {
             self.fill(
                 &self.tools,
                 summary.by_tool.iter().map(|(tool, usage)| {
                     (
+                        format!("{tool:?}"),
                         tool.label().to_owned(),
                         usage,
                         usage.tokens.total() as f64 / total_tokens,
                     )
                 }),
                 "tool",
+                summary.prices_available,
             );
         }
-        if previous.is_none_or(|before| before.by_model != summary.by_model) {
-            self.fill(&self.models, rows(&summary.by_model, total_tokens), "model");
+        if context_changed || previous.is_none_or(|before| before.by_model != summary.by_model) {
+            self.fill(
+                &self.models,
+                rows(&summary.by_model, total_tokens),
+                "model",
+                summary.prices_available,
+            );
         }
-        if previous.is_none_or(|before| before.by_project != summary.by_project) {
+        if context_changed || previous.is_none_or(|before| before.by_project != summary.by_project)
+        {
             self.fill(
                 &self.projects,
                 rows(&summary.by_project, total_tokens),
                 "project",
+                summary.prices_available,
             );
         }
         // Session rows show relative times, so they also refresh on the tick.
         self.sessions.remove_all();
         for session in summary.sessions.iter().take(MAX_SESSIONS) {
-            self.sessions.append(&session_row(session, now));
+            self.sessions
+                .append(&session_row(session, now, summary.prices_available));
         }
 
         self.update_limits(summary, now);
@@ -307,7 +356,9 @@ impl Ui {
                 chart::Day {
                     date,
                     tokens: usage.map_or(0, |usage| usage.tokens.total()),
-                    cost: usage.map_or(0.0, |usage| usage.cost),
+                    cost: summary
+                        .prices_available
+                        .then(|| usage.map_or(0.0, |usage| usage.cost)),
                 }
             })
             .collect();
@@ -317,13 +368,14 @@ impl Ui {
     fn fill<'a>(
         &self,
         list: &gtk::ListBox,
-        rows: impl Iterator<Item = (String, &'a Usage, f64)>,
+        rows: impl Iterator<Item = (String, String, &'a Usage, f64)>,
         kind: &str,
+        prices_available: bool,
     ) {
         list.remove_all();
-        for (title, usage, share) in rows {
-            let key = format!("{kind}:{title}");
-            let row = usage_row(&title, usage, share);
+        for (key, title, usage, share) in rows {
+            let key = format!("{kind}:{key}");
+            let row = usage_row(&title, usage, share, prices_available);
             row.set_expanded(self.expanded.borrow().contains(&key));
             let expanded = self.expanded.clone();
             row.connect_expanded_notify(move |row| {
@@ -359,9 +411,10 @@ impl Ui {
     }
 }
 
-fn rows(rows: &[Row], total: f64) -> impl Iterator<Item = (String, &Usage, f64)> {
+fn rows(rows: &[Row], total: f64) -> impl Iterator<Item = (String, String, &Usage, f64)> {
     rows.iter().map(move |row| {
         (
+            row.key.clone(),
             row.label.clone(),
             &row.usage,
             row.usage.tokens.total() as f64 / total,
@@ -369,14 +422,14 @@ fn rows(rows: &[Row], total: f64) -> impl Iterator<Item = (String, &Usage, f64)>
     })
 }
 
-fn usage_row(title: &str, usage: &Usage, share: f64) -> adw::ExpanderRow {
+fn usage_row(title: &str, usage: &Usage, share: f64, prices_available: bool) -> adw::ExpanderRow {
     let row = adw::ExpanderRow::builder()
         .title(title)
         .use_markup(false)
         .subtitle(format!(
             "{} · {} · {} req",
             format::percent(share),
-            format::cost(usage.cost),
+            display_cost(usage.cost, prices_available),
             usage.requests
         ))
         .build();
@@ -403,7 +456,7 @@ fn usage_row(title: &str, usage: &Usage, share: f64) -> adw::ExpanderRow {
     row
 }
 
-fn session_row(session: &SessionRow, now_ms: i64) -> adw::ActionRow {
+fn session_row(session: &SessionRow, now_ms: i64, prices_available: bool) -> adw::ActionRow {
     let mut subtitle = vec![session.tool.label().to_owned()];
     if let Some(project) = &session.project {
         subtitle.push(toktop::aggregate::project_label(project));
@@ -425,7 +478,7 @@ fn session_row(session: &SessionRow, now_ms: i64) -> adw::ActionRow {
         .build();
     let tokens = numeric(&format::tokens(session.usage.tokens.total()));
     tokens.set_halign(gtk::Align::End);
-    let cost = numeric(&format::cost(session.usage.cost));
+    let cost = numeric(&display_cost(session.usage.cost, prices_available));
     cost.set_halign(gtk::Align::End);
     cost.add_css_class("dim-label");
     cost.add_css_class("caption");
