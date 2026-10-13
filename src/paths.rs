@@ -56,6 +56,17 @@ pub fn codex_session_index() -> PathBuf {
         .join("session_index.jsonl")
 }
 
+/// Files outside the source roots that hold session titles.
+pub fn title_sources() -> Vec<PathBuf> {
+    let mut sources = vec![codex_session_index()];
+    sources.extend(
+        antigravity_homes()
+            .into_iter()
+            .map(|home| home.join("conversation_summaries.db")),
+    );
+    sources
+}
+
 pub fn config_home() -> PathBuf {
     env_dir("XDG_CONFIG_HOME").unwrap_or_else(|| home().join(".config"))
 }

@@ -1,15 +1,44 @@
+mod ui;
+
 use toktop::aggregate::{self, Period};
 use toktop::{format, store::Store};
 
 fn usage() -> ! {
-    eprintln!("usage: toktop --print [today|week|7d|month|30d|all]");
+    eprintln!("usage: toktop [--print [today|week|7d|month|30d|all]]");
     std::process::exit(2);
 }
 
-fn main() {
+/// Uses a single glibc malloc arena. The parallel initial scan otherwise
+/// leaves ~20 MB stranded in per-thread arenas for the life of the process.
+fn limit_malloc_arenas() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        const M_ARENA_MAX: i32 = -8;
+        unsafe extern "C" {
+            fn mallopt(param: i32, value: i32) -> i32;
+        }
+        // SAFETY: called before any other thread exists.
+        unsafe {
+            mallopt(M_ARENA_MAX, 1);
+        }
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    limit_malloc_arenas();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        Some("--print") => print(args.get(1).map(String::as_str)),
+        None => {
+            if ui::run() == gtk::glib::ExitCode::SUCCESS {
+                std::process::ExitCode::SUCCESS
+            } else {
+                std::process::ExitCode::FAILURE
+            }
+        }
+        Some("--print") => {
+            print(args.get(1).map(String::as_str));
+            std::process::ExitCode::SUCCESS
+        }
         _ => usage(),
     }
 }
@@ -35,12 +64,19 @@ fn print(period: Option<&str>) {
     store.sync_all();
     let summary = aggregate::summarize(&store, &prices, period, toktop::now_ms());
 
+    let cost = |value| {
+        if summary.prices_available {
+            format::cost(value)
+        } else {
+            "cost unavailable".to_owned()
+        }
+    };
     let total = &summary.total;
     println!(
         "{}: {} tokens, {}, {} requests",
         period.label(),
         format::tokens(total.tokens.total()),
-        format::cost(total.cost),
+        cost(total.cost),
         total.requests
     );
     println!("\nBy tool");
@@ -49,7 +85,7 @@ fn print(period: Option<&str>) {
             "  {:<14} {:>8}  {:>9}",
             tool.label(),
             format::tokens(usage.tokens.total()),
-            format::cost(usage.cost)
+            cost(usage.cost)
         );
     }
     for (title, rows) in [
@@ -62,7 +98,7 @@ fn print(period: Option<&str>) {
                 "  {:<28} {:>8}  {:>9}",
                 row.label,
                 format::tokens(row.usage.tokens.total()),
-                format::cost(row.usage.cost)
+                cost(row.usage.cost)
             );
         }
     }

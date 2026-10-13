@@ -177,7 +177,12 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(today_summary.total.tokens.input, 103);
     assert_eq!(today_summary.total.tokens.output, 50);
     assert!((today_summary.total.cost - 1.0).abs() < 1e-9);
+    assert!(today_summary.prices_available);
     assert_eq!(today_summary.unpriced, ["gpt-6.1-sol"]);
+    let unavailable = aggregate::summarize(&store, &PriceTable::default(), Period::Today, now);
+    assert!(!unavailable.prices_available);
+    assert!(unavailable.unpriced.is_empty());
+    assert_eq!(unavailable.total.tokens, today_summary.total.tokens);
     assert_eq!(today_summary.by_project[0].label, "app");
     assert_eq!(today_summary.by_project.len(), 1);
     assert_eq!(today_summary.sessions[0].title, "Indexed title");

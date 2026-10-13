@@ -13,7 +13,7 @@ A tool's model id is resolved in this order, trying aliases for each candidate:
 3. The bare name, preferring first-party provider entries.
 4. The id with trailing `-suffix` segments dropped (`claude-opus-4-6-thinking` → `claude-opus-4-6`). Gemini 3 and 3.1 Pro also try the catalog's `-preview` spelling.
 
-Models without a price count as zero cost and are listed as unpriced.
+When a price table is available, models without a price count as zero cost and are listed as unpriced. Without a price table, costs are hidden and individual unpriced-model warnings are suppressed.
 
 ## Cost
 

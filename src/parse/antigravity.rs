@@ -116,10 +116,10 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             continue;
         }
         let key: Option<Box<str>> = proto::string(usage, 11).map(Into::into);
-        if let Some(key) = &key {
-            if !seen.insert(key.clone()) {
-                continue;
-            }
+        if let Some(key) = &key
+            && !seen.insert(key.clone())
+        {
+            continue;
         }
 
         let ts = proto::bytes(chat, 9)
@@ -182,12 +182,11 @@ impl SessionModels {
                 by_display
                     .entry(label)
                     .and_modify(|resolved| {
-                        if let Some(existing) = *resolved {
-                            if crate::pricing::aliases::canonical_id(existing)
+                        if let Some(existing) = *resolved
+                            && crate::pricing::aliases::canonical_id(existing)
                                 != crate::pricing::aliases::canonical_id(model)
-                            {
-                                *resolved = None;
-                            }
+                        {
+                            *resolved = None;
                         }
                     })
                     .or_insert(Some(model));
@@ -312,12 +311,13 @@ fn uri_to_path(uri: &str) -> String {
     let mut decoded = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                decoded.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            decoded.push((hi << 4) | lo);
+            i += 3;
+            continue;
         }
         decoded.push(bytes[i]);
         i += 1;
