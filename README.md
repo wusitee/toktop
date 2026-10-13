@@ -22,4 +22,7 @@ toktop --print [today|week|7d|month|30d|all]
 
 ## Documentation
 
-- [Architecture](docs/architecture.md): sources, parsing and token accounting rules, pricing.
+- [Architecture](docs/architecture.md): modules, data flow, incremental reads
+- [Sources](docs/sources.md): where each tool's logs are read from
+- [Token accounting](docs/accounting.md): per-tool parsing and deduplication rules
+- [Pricing](docs/pricing.md): price source, model lookup and cost rules

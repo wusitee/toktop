@@ -1,0 +1,71 @@
+# Token accounting
+
+How each parser turns tool logs into usage events. The rules follow [tokscale](https://github.com/junhoyeo/tokscale), the engine Token Monitor uses, and are checked against its per-session totals.
+
+`Tokens` buckets are disjoint and sum to the total: uncached input, output, cache read, cache write and reasoning. `cache_write_1h` is the subset of `cache_write` written with a one-hour TTL.
+
+## Claude Code
+
+Source: `message.usage` on `assistant` lines. `output_tokens` already includes thinking, so `reasoning` stays zero.
+
+- Streaming writes one response several times. Copies sharing `message.id` + `requestId` merge by per-field maximum.
+- Input is the exception: a copy that supplies `input_tokens` together with cache fields carries only the uncached remainder and replaces a bare copy's whole-prompt input. Cache fields without input leave that input replaceable.
+- The 1-hour cache-write split (`cache_creation.ephemeral_1h_input_tokens`) is kept raw and clamped to the merged cache-write total.
+- Advisor calls in `usage.iterations` (`advisor_message`) are separate events under their own model. Malformed optional iterations are ignored without dropping main usage.
+- `<synthetic>` placeholder messages are ignored.
+
+## Codex
+
+Source: `token_count` events in rollout files. Cached and cache-write tokens are subsets of input, and reasoning a subset of output, so they are split into disjoint buckets.
+
+- Each request's `last_token_usage` is counted once, when `total_token_usage` changes.
+- A total that drops by less than about one request is a late duplicate and is skipped. A larger drop, or a restart at the request's own size, is a compaction reset and is counted.
+- Rows without `last_token_usage` fall back to the difference of totals. A last-only row advances the baseline by its usage, so a later cumulative snapshot does not count it again.
+- Events are keyed by session id, timestamp and total, so a rollout in both `sessions/` and `archived_sessions/` counts once.
+
+### Service tiers
+
+- Thread tiers come from `thread_settings_applied` snapshots and persist across turns. A snapshot without a tier clears the thread tier.
+- Request tiers from turn contexts, usage records or token-count metadata override the thread tier until the next turn context.
+- Pricing per tier is described in [pricing.md](pricing.md#service-tiers).
+
+### Forked threads
+
+Forked threads (`forked_from_id`, `parent_thread_id` or `source.subagent.thread_spawn`) begin by replaying the parent's turns. Replayed counts set the baseline without emitting usage.
+
+- **Opening the gate.** When both the session and turn ids are UUIDv7, their creation times are compared: an older turn is replayed, a turn at or after the fork is the fork's own. Legacy turn ids instead require a child-local `task_started` announcement followed by the matching `turn_context`. For a UUIDv7 child, a legacy announcement's `started_at` must be at or after the child's creation second.
+- **Inherited totals.** Totals seen during replay that are re-reported after the gate opens are skipped without lowering the baseline, except a genuine reset whose total equals the request's own usage. An accepted compaction reset retires the inherited totals.
+- **Settings.** During replay, only `thread_settings_applied` snapshots whose `thread_id` matches the fork's own session id affect its tier, including snapshots before its first local turn.
+
+## Antigravity
+
+Source: `gen_metadata` rows, each a protobuf without a published schema. Field numbers follow tokscale's reverse-engineered layout.
+
+| Field | Meaning |
+|---|---|
+| `chatModel.usage.#1 + #2` | Input (fixed system prompt + new input) |
+| `chatModel.usage.#5` | Cache read |
+| `chatModel.usage.#9` | Output |
+| `chatModel.usage.#10` | Thinking, disjoint from output |
+| `chatModel.usage.#11` | Response id, used to deduplicate rows |
+| `chatModel.#19` | Model id |
+| `chatModel.#21` | Model display label |
+
+**Model recovery.** A first pass maps display labels to model ids, so a continuation row missing its id recovers it from a sibling row with the same label. Routing ids (`gemini-default`) are not concrete models and use the same recovery. Labels seen with different priced models are ambiguous and recover nothing. A row with neither field uses the file's single model id only when every label was identified; otherwise it stays `unknown`. Labels are join keys, never pricing keys.
+
+**Timestamps**, in order of preference:
+
+1. The explicit legacy generation timestamp (`chatModel.#9.#4`).
+2. The referenced step's metadata (`root.#2` → `steps.idx`).
+3. A planner response step (`step_type = 15`) joined by response id (`metadata.#9.#11`), then by generation index (`metadata.#20.#3`).
+4. Session creation time, or the file's mtime.
+
+## Cross-file deduplication
+
+A response copied into several files (resumed or forked sessions) is counted once, at aggregation time, using each event's stable key. Copies merge with the same rules as Claude streaming copies: per-field maxima, split-derived input replacing bare input, and the raw 1-hour cache-write maximum clamped only after merging. Events keep the input-split provenance and the raw split across files for this.
+
+A keyed copy that carries only a raw cache split stays pending for later copies. Events whose merged buckets are still empty are excluded from totals, request counts and session lists.
+
+## Known differences from tokscale
+
+When a Codex counter restarts after compaction and the new total equals the request's own usage, toktop counts the request; tokscale treats it as a duplicate.
