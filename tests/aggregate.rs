@@ -336,6 +336,24 @@ fn cost_uses_priority_rates_and_doubles_missing_tariffs() {
     }"#,
     )
     .unwrap();
+    // A flat priority tariff remains valid above 272K when no context tier exists.
+    let flat = PriceTable::from_litellm(
+        br#"{"gpt-4.1": {"input_cost_per_token": 2e-6,
+            "output_cost_per_token": 8e-6, "cache_read_input_token_cost": 0.5e-6,
+            "input_cost_per_token_priority": 3.5e-6,
+            "output_cost_per_token_priority": 14e-6,
+            "cache_read_input_token_cost_priority": 0.875e-6}}"#,
+    )
+    .unwrap();
+    let flat = flat.lookup("gpt-4.1").unwrap();
+    let long_flat = Tokens {
+        input: 300_000,
+        output: 1_000,
+        cache_read: 50_000,
+        ..Tokens::default()
+    };
+    assert!((flat.cost(&long_flat, ServiceTier::Priority) - 1.10775).abs() < 1e-12);
+
     // Reduced priority tariffs survive disk caching.
     table.save(&cache).unwrap();
     let (table, _) = PriceTable::load(&cache).unwrap();

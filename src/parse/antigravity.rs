@@ -295,7 +295,34 @@ fn mtime_ms(path: &Path) -> Option<i64> {
 }
 
 fn uri_to_path(uri: &str) -> String {
-    uri.strip_prefix("file://").unwrap_or(uri).to_owned()
+    let Some(path) = uri.strip_prefix("file://") else {
+        return uri.to_owned();
+    };
+    let path = path
+        .strip_prefix("localhost")
+        .filter(|path| path.starts_with('/'))
+        .unwrap_or(path);
+    let hex = |byte| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    };
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                decoded.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        decoded.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(decoded).unwrap_or_else(|_| path.to_owned())
 }
 
 /// Conversation titles from every Antigravity home's summary database.

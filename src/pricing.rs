@@ -84,19 +84,20 @@ impl Price {
         let cache_write_1h = cache_write_1h.unwrap_or(cache_write_5m);
         let (input, output, cache_read, cache_write_5m, cache_write_1h) =
             if service_tier == ServiceTier::Priority {
-                let (priority_input, priority_output, priority_cache_read) = if prompt > 272_000 {
-                    (
-                        self.input_priority_above_272k,
-                        self.output_priority_above_272k,
-                        self.cache_read_priority_above_272k,
-                    )
-                } else {
-                    (
-                        self.input_priority,
-                        self.output_priority,
-                        self.cache_read_priority,
-                    )
-                };
+                let (priority_input, priority_output, priority_cache_read) =
+                    if self.tier.is_some_and(|tier| prompt > tier.threshold) {
+                        (
+                            self.input_priority_above_272k,
+                            self.output_priority_above_272k,
+                            self.cache_read_priority_above_272k,
+                        )
+                    } else {
+                        (
+                            self.input_priority,
+                            self.output_priority,
+                            self.cache_read_priority,
+                        )
+                    };
                 // tokscale doubles the complete standard cost, including cached
                 // tokens and long-context rates, when no priority tariff is given.
                 (

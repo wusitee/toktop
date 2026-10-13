@@ -225,6 +225,47 @@ fn codex_fork_skips_replayed_parent_turns() {
     assert_eq!(session.events[0].tier, ServiceTier::Standard);
 }
 
+#[test]
+fn codex_fork_accepts_own_settings_before_local_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout-fork.jsonl");
+    let mut text = concat!(
+        r#"{"type":"session_meta","payload":{"id":"01a109b5-e987-7602-86e6-baf20e2d564e","forked_from_id":"01a109b5-0000-7000-8000-000000000001"}}"#, "\n",
+        r#"{"type":"session_meta","payload":{"id":"01a109b5-0000-7000-8000-000000000001"}}"#, "\n",
+        r#"{"type":"turn_context","payload":{"turn_id":"01a109b5-0000-7000-8000-000000000002","model":"gpt-6.1-sol"}}"#, "\n",
+        r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"01a109b5-0000-7000-8000-000000000001","thread_settings":{"service_tier":"priority"}}}"#, "\n",
+    ).to_owned();
+    text += &codex_count("2026-10-05T10:00:00Z", 5000, 4000, 0, 1000, 0);
+    text += concat!(
+        r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_id":"01a109b5-e987-7602-86e6-baf20e2d564e","thread_settings":{"service_tier":"priority"}}}"#,
+        "\n",
+    );
+    // Neither parent, unrelated nor unscoped snapshots may clear the child's tier.
+    for thread_id in [
+        Some("01a109b5-0000-7000-8000-000000000001"),
+        Some("other"),
+        None,
+    ] {
+        text += &serde_json::json!({
+            "type": "event_msg",
+            "payload": {"type": "thread_settings_applied", "thread_id": thread_id, "thread_settings": {}}
+        }).to_string();
+        text += "\n";
+    }
+    text += concat!(
+        r#"{"type":"turn_context","payload":{"turn_id":"01a109b5-e988-7000-8000-000000000001","model":"gpt-6.1-sol"}}"#,
+        "\n",
+    );
+    text += &codex_count("2026-10-05T10:00:01Z", 24_351, 19_000, 0, 351, 0);
+    write(&path, &text);
+
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(session.id, "01a109b5-e987-7602-86e6-baf20e2d564e");
+    assert_eq!(session.events.len(), 1);
+    assert_eq!(session.events[0].tokens.total(), 19_351);
+    assert_eq!(session.events[0].tier, ServiceTier::Priority);
+}
+
 fn varint(out: &mut Vec<u8>, mut value: u64) {
     while value >= 0x80 {
         out.push(value as u8 | 0x80);
@@ -352,6 +393,37 @@ fn antigravity_reads_generation_metadata() {
             reasoning: 70,
         }
     );
+}
+
+#[test]
+fn antigravity_decodes_workspace_uri_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("workspace.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE trajectory_metadata_blob (data blob);
+         CREATE TABLE gen_metadata (idx integer, data blob);",
+    )
+    .unwrap();
+    for (uri, expected) in [
+        ("file:///work/my%20project", "/work/my project"),
+        ("file://localhost/work/my%20project", "/work/my project"),
+        ("file:///work/%E6%88%91%e7%9a%84", "/work/我的"),
+        ("file:///work/%FF%20project", "/work/%FF%20project"),
+        ("file:///work/bad%2%GG+name", "/work/bad%2%GG+name"),
+        ("/work/my%20project", "/work/my%20project"),
+    ] {
+        let mut folder = Vec::new();
+        field_bytes(&mut folder, 1, uri.as_bytes());
+        let mut meta = Vec::new();
+        field_bytes(&mut meta, 1, &folder);
+        conn.execute("DELETE FROM trajectory_metadata_blob", [])
+            .unwrap();
+        conn.execute("INSERT INTO trajectory_metadata_blob VALUES (?1)", [&meta])
+            .unwrap();
+        let (session, _) = parse::parse_full(Tool::Antigravity, &path).unwrap();
+        assert_eq!(session.project.as_deref(), Some(expected), "{uri}");
+    }
 }
 
 #[test]

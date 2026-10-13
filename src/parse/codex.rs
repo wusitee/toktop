@@ -58,6 +58,7 @@ struct Payload {
     forked_from_id: Option<String>,
     parent_thread_id: Option<String>,
     source: Option<serde_json::Value>,
+    thread_id: Option<String>,
     turn_id: Option<String>,
     started_at: Option<serde_json::Value>,
     cwd: Option<String>,
@@ -278,7 +279,8 @@ impl State {
             }
             Some("event_msg")
                 if payload.kind.as_deref() == Some("thread_settings_applied")
-                    && self.replaying_before.is_none() =>
+                    && (self.replaying_before.is_none()
+                        || payload.thread_id.as_deref() == Some(session.id.as_str())) =>
             {
                 if let Some(settings) = payload.thread_settings {
                     self.thread_tier = settings.service_tier;
