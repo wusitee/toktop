@@ -20,13 +20,16 @@
 //! rollout present in both `sessions/` and `archived_sessions/` counts once.
 
 use super::{clamp, contains, parse_ts};
-use crate::model::{Event, LimitWindow, RateLimits, Session, Tokens};
-use serde::Deserialize;
+use crate::model::{Event, LimitWindow, RateLimits, ServiceTier, Session, Tokens};
+use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
 
 #[derive(Debug, Default)]
 pub struct State {
     model: Option<String>,
+    /// Thread snapshots persist across turns; request metadata overrides only this turn.
+    thread_tier: Option<ServiceTier>,
+    request_tier: Option<ServiceTier>,
     /// Cumulative usage of the last accepted snapshot.
     last_total: Option<Usage>,
     /// Set after the first `session_meta`; later ones are replayed parent history.
@@ -61,10 +64,36 @@ struct Payload {
     model: Option<String>,
     info: Option<Info>,
     rate_limits: Option<Limits>,
+    #[serde(default, deserialize_with = "service_tier")]
+    service_tier: Option<ServiceTier>,
+    thread_settings: Option<TurnSettings>,
+    usage: Option<Usage>,
+}
+
+#[derive(Deserialize)]
+struct TurnSettings {
+    #[serde(default, deserialize_with = "service_tier")]
+    service_tier: Option<ServiceTier>,
+}
+
+impl Payload {
+    fn request_tier(&self) -> Option<ServiceTier> {
+        self.service_tier
+            .or_else(|| {
+                self.info.as_ref().and_then(|info| {
+                    info.service_tier
+                        .or_else(|| info.last_token_usage.and_then(|usage| usage.service_tier))
+                        .or_else(|| info.total_token_usage.and_then(|usage| usage.service_tier))
+                })
+            })
+            .or_else(|| self.usage.and_then(|usage| usage.service_tier))
+    }
 }
 
 #[derive(Deserialize)]
 struct Info {
+    #[serde(default, deserialize_with = "service_tier")]
+    service_tier: Option<ServiceTier>,
     total_token_usage: Option<Usage>,
     last_token_usage: Option<Usage>,
     model: Option<String>,
@@ -72,6 +101,8 @@ struct Info {
 
 #[derive(Debug, Deserialize, Clone, Copy)]
 struct Usage {
+    #[serde(default, deserialize_with = "service_tier")]
+    service_tier: Option<ServiceTier>,
     input_tokens: Option<i64>,
     cached_input_tokens: Option<i64>,
     cache_write_input_tokens: Option<i64>,
@@ -95,6 +126,7 @@ impl Usage {
             (now >= before).then_some(Some(now - before))
         };
         Some(Usage {
+            service_tier: None,
             input_tokens: sub(self.input_tokens, previous.input_tokens)?,
             cached_input_tokens: sub(self.cached_input_tokens, previous.cached_input_tokens)?,
             cache_write_input_tokens: sub(
@@ -121,6 +153,7 @@ impl Usage {
             )
         };
         Usage {
+            service_tier: None,
             input_tokens: add(self.input_tokens, last.input_tokens),
             cached_input_tokens: add(self.cached_input_tokens, last.cached_input_tokens),
             cache_write_input_tokens: add(
@@ -188,13 +221,24 @@ impl State {
         let turn_context = !token_count && contains(raw, b"\"turn_context\"");
         let meta = !token_count && !self.have_meta && contains(raw, b"\"session_meta\"");
         let task_started = self.replaying_before.is_some() && contains(raw, b"\"task_started\"");
-        if !token_count && !turn_context && !meta && !task_started {
+        let tier_record = contains(raw, b"\"thread_settings_applied\"")
+            || contains(raw, b"\"token_usage_record\"")
+            || contains(raw, b"\"service_tier\"");
+        if !token_count && !turn_context && !meta && !task_started && !tier_record {
             return;
         }
         let Ok(line) = serde_json::from_slice::<Line>(raw) else {
             return;
         };
         let Some(payload) = line.payload else { return };
+
+        if !matches!(line.kind.as_deref(), Some("turn_context" | "session_meta"))
+            && self.replaying_before.is_none()
+        {
+            if let Some(tier) = payload.request_tier() {
+                self.request_tier = Some(tier);
+            }
+        }
 
         match line.kind.as_deref() {
             Some("session_meta") if !self.have_meta => {
@@ -225,8 +269,21 @@ impl State {
                         self.task_started_turn_ids.clear();
                     }
                 }
+                if self.replaying_before.is_none() {
+                    self.request_tier = payload.request_tier();
+                }
                 if payload.model.is_some() {
                     self.model = payload.model;
+                }
+            }
+            Some("event_msg")
+                if payload.kind.as_deref() == Some("thread_settings_applied")
+                    && self.replaying_before.is_none() =>
+            {
+                if let Some(settings) = payload.thread_settings {
+                    self.thread_tier = settings.service_tier;
+                } else if let Some(tier) = payload.request_tier() {
+                    self.thread_tier = Some(tier);
                 }
             }
             Some("event_msg") if payload.kind.as_deref() == Some("task_started") => {
@@ -338,11 +395,29 @@ impl State {
             ts,
             model,
             tokens,
+            tier: self.request_tier.or(self.thread_tier).unwrap_or_default(),
             key,
             input_is_split: false,
             cache_write_1h_raw: 0,
         });
     }
+}
+
+fn service_tier<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<ServiceTier>, D::Error> {
+    let tier = Option::<String>::deserialize(deserializer)?;
+    Ok(tier
+        .as_deref()
+        .map(str::trim)
+        .filter(|tier| !tier.is_empty())
+        .map(|tier| {
+            if tier.eq_ignore_ascii_case("priority") || tier.eq_ignore_ascii_case("fast") {
+                ServiceTier::Priority
+            } else {
+                ServiceTier::Standard
+            }
+        }))
 }
 
 /// Creation time of a UUIDv7; legacy random UUIDs cannot order turns.

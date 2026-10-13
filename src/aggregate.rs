@@ -68,6 +68,8 @@ impl Usage {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
+    /// Stable model id or full project path, independent of the display label.
+    pub key: String,
     pub label: String,
     pub usage: Usage,
 }
@@ -115,7 +117,11 @@ fn local_date(ts: i64) -> NaiveDate {
 fn sorted_rows(map: HashMap<String, Usage>) -> Vec<Row> {
     let mut rows: Vec<Row> = map
         .into_iter()
-        .map(|(label, usage)| Row { label, usage })
+        .map(|(key, usage)| Row {
+            label: key.clone(),
+            key,
+            usage,
+        })
         .collect();
     rows.sort_by(|a, b| {
         b.usage
@@ -206,7 +212,7 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
             let price = *price_cache
                 .entry(model)
                 .or_insert_with(|| prices.lookup(model).copied());
-            let cost = price.map_or(0.0, |price| price.cost(&tokens));
+            let cost = price.map_or(0.0, |price| price.cost(&tokens, event.tier));
 
             daily
                 .entry(local_date(event.ts))
@@ -229,7 +235,7 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
                 .add(&tokens, cost);
             if let Some(project) = &session.project {
                 by_project
-                    .entry(project_label(project))
+                    .entry(project.trim_end_matches('/').to_owned())
                     .or_default()
                     .add(&tokens, cost);
             }
@@ -274,6 +280,25 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
     summary.by_tool = tools;
     summary.by_model = sorted_rows(by_model);
     summary.by_project = sorted_rows(by_project);
+    let paths: Vec<_> = summary
+        .by_project
+        .iter()
+        .map(|row| row.key.clone())
+        .collect();
+    for row in &mut summary.by_project {
+        // Grow the suffix until no other project has the same path components.
+        let mut suffix = row.key.as_str();
+        for (index, _) in row.key.rmatch_indices('/') {
+            suffix = &row.key[index + 1..];
+            if !paths.iter().any(|other| {
+                other != &row.key && (other == suffix || other.ends_with(&format!("/{suffix}")))
+            }) {
+                break;
+            }
+            suffix = &row.key;
+        }
+        row.label = suffix.to_owned();
+    }
     summary
         .sessions
         .sort_by_key(|row| std::cmp::Reverse(row.last_activity));

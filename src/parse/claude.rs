@@ -12,7 +12,7 @@
 //! `usage.iterations` are separate events under their own model.
 
 use super::{clamp, contains, parse_ts};
-use crate::model::{Event, Session, Tokens};
+use crate::model::{Event, ServiceTier, Session, Tokens};
 use serde::Deserialize;
 use std::collections::HashMap;
 
@@ -52,8 +52,7 @@ struct Usage {
     cache_read_input_tokens: Option<i64>,
     cache_creation_input_tokens: Option<i64>,
     cache_creation: Option<CacheCreation>,
-    #[serde(default)]
-    iterations: Vec<Iteration>,
+    iterations: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -154,7 +153,14 @@ impl State {
         if let Some(model) = message.model.as_deref() {
             self.record(session, ts, model, &usage, key.clone());
         }
-        for (index, iteration) in usage.iterations.iter().enumerate() {
+        let iterations = usage
+            .iterations
+            .as_ref()
+            .and_then(serde_json::Value::as_array);
+        for (index, value) in iterations.into_iter().flatten().enumerate() {
+            let Ok(iteration) = serde_json::from_value::<Iteration>(value.clone()) else {
+                continue;
+            };
             if iteration.kind.as_deref() != Some("advisor_message") {
                 continue;
             }
@@ -179,6 +185,7 @@ impl State {
             ts,
             model: 0,
             tokens: usage.tokens(),
+            tier: ServiceTier::Standard,
             key: key.map(Into::into),
             input_is_split: usage.input_tokens.is_some() && usage.reports_split(),
             cache_write_1h_raw: usage.cache_write_1h(),

@@ -3,7 +3,7 @@
 //! The upstream table (~3 MB) is downloaded at most once a day and reduced to
 //! the few fields toktop prices with before it is cached on disk.
 
-use crate::model::Tokens;
+use crate::model::{ServiceTier, Tokens};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -25,6 +25,19 @@ pub struct Price {
     pub cache_read: Option<f64>,
     pub cache_write: Option<f64>,
     pub cache_write_1h: Option<f64>,
+    /// Explicit priority-processing rates; absent rates use a 2x standard premium.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_priority: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_priority: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_priority: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_priority_above_272k: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_priority_above_272k: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_priority_above_272k: Option<f64>,
     /// Long-context tier: rates applied when a request's prompt exceeds `threshold` tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tier: Option<Tier>,
@@ -44,7 +57,7 @@ pub struct Tier {
 
 impl Price {
     /// Cost in USD of one request.
-    pub fn cost(&self, tokens: &Tokens) -> f64 {
+    pub fn cost(&self, tokens: &Tokens, service_tier: ServiceTier) -> f64 {
         let prompt = tokens
             .input
             .saturating_add(tokens.cache_read)
@@ -66,12 +79,40 @@ impl Price {
                 self.cache_write_1h,
             ),
         };
+        let cache_read = cache_read.unwrap_or(input);
         let cache_write_5m = cache_write.unwrap_or(input);
         let cache_write_1h = cache_write_1h.unwrap_or(cache_write_5m);
+        let (input, output, cache_read, cache_write_5m, cache_write_1h) =
+            if service_tier == ServiceTier::Priority {
+                let (priority_input, priority_output, priority_cache_read) = if prompt > 272_000 {
+                    (
+                        self.input_priority_above_272k,
+                        self.output_priority_above_272k,
+                        self.cache_read_priority_above_272k,
+                    )
+                } else {
+                    (
+                        self.input_priority,
+                        self.output_priority,
+                        self.cache_read_priority,
+                    )
+                };
+                // tokscale doubles the complete standard cost, including cached
+                // tokens and long-context rates, when no priority tariff is given.
+                (
+                    priority_input.unwrap_or(input * 2.0),
+                    priority_output.unwrap_or(output * 2.0),
+                    priority_cache_read.unwrap_or(cache_read * 2.0),
+                    cache_write_5m * 2.0,
+                    cache_write_1h * 2.0,
+                )
+            } else {
+                (input, output, cache_read, cache_write_5m, cache_write_1h)
+            };
         let long_writes = tokens.cache_write_1h.min(tokens.cache_write);
         tokens.input as f64 * input
             + tokens.output.saturating_add(tokens.reasoning) as f64 * output
-            + tokens.cache_read as f64 * cache_read.unwrap_or(input)
+            + tokens.cache_read as f64 * cache_read
             + (tokens.cache_write - long_writes) as f64 * cache_write_5m
             + long_writes as f64 * cache_write_1h
     }
@@ -219,6 +260,15 @@ impl PriceTable {
                     cache_read: entry.cache_read_input_token_cost,
                     cache_write: entry.cache_creation_input_token_cost,
                     cache_write_1h: entry.cache_creation_input_token_cost_above_1hr,
+                    input_priority: entry.input_cost_per_token_priority,
+                    output_priority: entry.output_cost_per_token_priority,
+                    cache_read_priority: entry.cache_read_input_token_cost_priority,
+                    input_priority_above_272k: entry
+                        .input_cost_per_token_above_272k_tokens_priority,
+                    output_priority_above_272k: entry
+                        .output_cost_per_token_above_272k_tokens_priority,
+                    cache_read_priority_above_272k: entry
+                        .cache_read_input_token_cost_above_272k_tokens_priority,
                     tier: tier(
                         200_000,
                         entry.input_cost_per_token_above_200k_tokens,
@@ -268,6 +318,18 @@ impl PriceTable {
 
 #[derive(Deserialize)]
 struct RawEntry {
+    #[serde(default, deserialize_with = "lenient_f64")]
+    input_cost_per_token_priority: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    output_cost_per_token_priority: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    cache_read_input_token_cost_priority: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    input_cost_per_token_above_272k_tokens_priority: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    output_cost_per_token_above_272k_tokens_priority: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    cache_read_input_token_cost_above_272k_tokens_priority: Option<f64>,
     #[serde(default, deserialize_with = "lenient_str")]
     mode: Option<String>,
     #[serde(default, deserialize_with = "lenient_f64")]

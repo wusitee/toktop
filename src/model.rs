@@ -93,6 +93,20 @@ impl AddAssign<&Tokens> for Tokens {
     }
 }
 
+/// Processing tier recorded by Codex. Other tools use standard pricing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServiceTier {
+    #[default]
+    Standard,
+    Priority,
+}
+
+impl ServiceTier {
+    fn is_standard(&self) -> bool {
+        *self == Self::Standard
+    }
+}
+
 /// One model response with its token usage.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Event {
@@ -101,6 +115,8 @@ pub struct Event {
     /// Index into the owning [`Source::models`] list.
     pub model: u32,
     pub tokens: Tokens,
+    #[serde(default, skip_serializing_if = "ServiceTier::is_standard")]
+    pub tier: ServiceTier,
     /// Stable message identity, used to drop copies of one response that
     /// appear in several files (resumed or forked sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -13,7 +13,7 @@
 //! Titles come from `conversation_summaries.db` next to `conversations/`.
 
 use super::{file_stem, proto};
-use crate::model::{Event, Session, Tokens};
+use crate::model::{Event, ServiceTier, Session, Tokens};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::{HashMap, HashSet};
 use std::io;
@@ -133,14 +133,18 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             })
             .or_else(|| step_times.by_generation.get(&gen_index).copied())
             .unwrap_or(fallback_ms);
-        let model = non_empty_string(chat, 19)
+        let response_model = non_empty_string(chat, 19);
+        let model = response_model
+            .filter(|model| !is_routing_label(model))
             .or_else(|| models.recover(chat))
+            .or(response_model)
             .unwrap_or("unknown");
         let model = session.model_index(model);
         session.events.push(Event {
             ts,
             model,
             tokens,
+            tier: ServiceTier::Standard,
             key,
             input_is_split: false,
             cache_write_1h_raw: 0,
@@ -170,6 +174,9 @@ impl SessionModels {
             let Some(model) = non_empty_string(chat, 19) else {
                 continue;
             };
+            if is_routing_label(model) {
+                continue;
+            }
             distinct.insert(model);
             if let Some(label) = label {
                 by_display
@@ -209,6 +216,11 @@ impl SessionModels {
             None => self.sole_model.as_deref(),
         }
     }
+}
+
+/// tokscale's generic Antigravity router id carries no concrete model identity.
+fn is_routing_label(model: &str) -> bool {
+    model.trim().eq_ignore_ascii_case("gemini-default")
 }
 
 fn non_empty_string(blob: &[u8], number: u64) -> Option<&str> {

@@ -3,7 +3,7 @@
 use chrono::{Local, NaiveDate, TimeZone};
 use std::collections::HashMap;
 use toktop::aggregate::{self, Period};
-use toktop::model::{Event, Session, Tokens, Tool};
+use toktop::model::{Event, ServiceTier, Session, Tokens, Tool};
 use toktop::pricing::{Price, PriceTable, Tier};
 use toktop::store::Store;
 
@@ -66,6 +66,7 @@ fn cost_applies_cache_and_long_context_rates() {
             cache_write: Some(1e-05),
             cache_write_1h: None,
         }),
+        ..Price::default()
     };
     let tokens = Tokens {
         input: 100,
@@ -76,7 +77,8 @@ fn cost_applies_cache_and_long_context_rates() {
         reasoning: 5,
     };
     let expected = 100.0 * 4e-06 + 15.0 * 2e-05 + 500.0 * 2e-07 + 200.0 * 5e-06 + 100.0 * 8e-06;
-    assert!((price.cost(&tokens) - expected).abs() < 1e-12);
+    assert!((price.cost(&tokens, ServiceTier::Standard) - expected).abs() < 1e-12);
+    assert!((price.cost(&tokens, ServiceTier::Priority) - expected * 2.0).abs() < 1e-12);
 
     // Above the threshold, tier rates apply; missing ones fall back to base rates.
     let long = Tokens {
@@ -86,7 +88,8 @@ fn cost_applies_cache_and_long_context_rates() {
         ..Tokens::default()
     };
     let expected = 2000.0 * 8e-06 + 200.0 * 1e-05 + 100.0 * 8e-06;
-    assert!((price.cost(&long) - expected).abs() < 1e-12);
+    assert!((price.cost(&long, ServiceTier::Standard) - expected).abs() < 1e-12);
+    assert!((price.cost(&long, ServiceTier::Priority) - expected * 2.0).abs() < 1e-12);
 }
 
 fn ms(date: NaiveDate, hour: u32) -> i64 {
@@ -108,6 +111,7 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
             .map(|(ts, input, key)| Event {
                 ts,
                 model: 0,
+                tier: ServiceTier::Standard,
                 tokens: Tokens {
                     input,
                     ..Tokens::default()
@@ -236,4 +240,137 @@ fn recent_token_rate_saturates() {
     );
     let summary = aggregate::summarize(&store, &PriceTable::default(), Period::AllTime, now);
     assert_eq!(summary.rate_per_min, u64::MAX as f64 / 5.0);
+}
+
+#[test]
+fn projects_keep_full_paths_and_disambiguate_display_labels() {
+    let mut store = Store::default();
+    for (index, (path, input)) in [
+        ("/work/client-a/api", 10),
+        ("/work/client-a/api///", 20),
+        ("/work/client-b/api", 40),
+        ("/other/client-a/api", 80),
+        ("/work/web", 160),
+        ("/work/api", 320),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store.insert_session(
+            format!("/{index}.jsonl").into(),
+            Tool::Codex,
+            session(
+                &index.to_string(),
+                path,
+                "gpt-6.1-sol",
+                vec![(0, input, None)],
+            ),
+        );
+    }
+    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::AllTime, 0);
+    let projects: HashMap<_, _> = summary
+        .by_project
+        .iter()
+        .map(|row| (row.label.as_str(), row.usage.tokens.input))
+        .collect();
+    assert_eq!(
+        projects,
+        HashMap::from([
+            ("work/client-a/api", 30),
+            ("client-b/api", 40),
+            ("other/client-a/api", 80),
+            ("web", 160),
+            ("work/api", 320),
+        ])
+    );
+    assert_eq!(
+        summary
+            .by_project
+            .iter()
+            .find(|row| row.label == "work/client-a/api")
+            .unwrap()
+            .key,
+        "/work/client-a/api"
+    );
+    assert_eq!(aggregate::project_label("/work/client-a/api/"), "api");
+}
+
+#[test]
+fn cost_uses_priority_rates_and_doubles_missing_tariffs() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("prices.json");
+    // Old reduced caches have neither service-tier fields nor a long-context tier.
+    std::fs::write(
+        &cache,
+        r#"{"prices":{"gpt-legacy":{"input":1,"output":2,
+        "cache_read":0.25,"cache_write":null,"cache_write_1h":null}}}"#,
+    )
+    .unwrap();
+    let (legacy, _) = PriceTable::load(&cache).unwrap();
+    let legacy = legacy.lookup("gpt-legacy").unwrap();
+    let tokens = Tokens {
+        input: 10,
+        output: 3,
+        reasoning: 2,
+        cache_read: 20,
+        cache_write: 4,
+        cache_write_1h: 1,
+    };
+    assert_eq!(
+        legacy.cost(&tokens, ServiceTier::Priority),
+        legacy.cost(&tokens, ServiceTier::Standard) * 2.0
+    );
+
+    let table = PriceTable::from_litellm(
+        br#"{
+        "gpt-6.1-sol": {"input_cost_per_token": 1, "output_cost_per_token": 2,
+            "cache_read_input_token_cost": 0.25,
+            "input_cost_per_token_above_272k_tokens": 2,
+            "output_cost_per_token_above_272k_tokens": 4,
+            "cache_read_input_token_cost_above_272k_tokens": 0.5,
+            "input_cost_per_token_priority": 3, "output_cost_per_token_priority": 5,
+            "cache_read_input_token_cost_priority": 0.75,
+            "input_cost_per_token_above_272k_tokens_priority": 6,
+            "output_cost_per_token_above_272k_tokens_priority": 10,
+            "cache_read_input_token_cost_above_272k_tokens_priority": 1.5}
+    }"#,
+    )
+    .unwrap();
+    // Reduced priority tariffs survive disk caching.
+    table.save(&cache).unwrap();
+    let (table, _) = PriceTable::load(&cache).unwrap();
+    let price = *table.lookup("gpt-6.1-sol").unwrap();
+    assert_eq!(price.cost(&tokens, ServiceTier::Standard), 29.0);
+    assert_eq!(price.cost(&tokens, ServiceTier::Priority), 78.0);
+    let boundary = Tokens {
+        input: 272_000,
+        ..Tokens::default()
+    };
+    assert_eq!(
+        price.cost(&boundary, ServiceTier::Priority),
+        272_000.0 * 3.0
+    );
+    let long = Tokens {
+        input: 272_001,
+        ..tokens
+    };
+    assert_eq!(
+        price.cost(&long, ServiceTier::Priority),
+        272_001.0 * 6.0 + 5.0 * 10.0 + 20.0 * 1.5 + 4.0 * 4.0
+    );
+    // Missing rates double the corresponding effective standard rate, even
+    // above the context threshold; cache writes retain the same premium.
+    let partial = Price {
+        output_priority: None,
+        cache_read_priority: None,
+        input_priority_above_272k: None,
+        output_priority_above_272k: None,
+        cache_read_priority_above_272k: None,
+        ..price
+    };
+    assert_eq!(partial.cost(&tokens, ServiceTier::Priority), 68.0);
+    assert_eq!(
+        partial.cost(&long, ServiceTier::Priority),
+        partial.cost(&long, ServiceTier::Standard) * 2.0
+    );
 }

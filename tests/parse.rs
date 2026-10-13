@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::path::Path;
-use toktop::model::{Tokens, Tool};
+use toktop::model::{ServiceTier, Tokens, Tool};
 use toktop::parse;
 
 fn write(path: &Path, text: &str) {
@@ -196,6 +196,8 @@ fn codex_fork_skips_replayed_parent_turns() {
     // A subagent identified only by nested spawn metadata.
     text += r#"{"timestamp":"2026-10-01T11:00:00Z","type":"session_meta","payload":{"id":"01a00000-0500-7fff-8000-000000000000","cwd":"/work/app","source":{"subagent":{"thread_spawn":{"parent_thread_id":"01a00000-0000-7000-8000-000000000001"}}}}}"#;
     text += "\n";
+    text += "{\"type\":\"event_msg\",\"payload\":{\"type\":\"thread_settings_applied\",\"thread_settings\":{\"service_tier\":\"priority\"}}}\n";
+    text += "{\"type\":\"token_usage_record\",\"payload\":{\"usage\":{\"service_tier\":\"priority\"}}}\n";
     // Parent history, replayed with its original (older) ids.
     text += r#"{"timestamp":"2026-10-01T11:00:00Z","type":"session_meta","payload":{"id":"01a00000-0000-7000-8000-000000000001"}}"#;
     text += "\n";
@@ -220,6 +222,7 @@ fn codex_fork_skips_replayed_parent_turns() {
         "gpt-6-luna"
     );
     assert!(session.events[0].key.is_some());
+    assert_eq!(session.events[0].tier, ServiceTier::Standard);
 }
 
 fn varint(out: &mut Vec<u8>, mut value: u64) {
@@ -536,6 +539,15 @@ fn antigravity_recovers_models_without_guessing_from_labels() {
             ][..],
             "MODEL_PLACEHOLDER_M35",
         ),
+        // tokscale's routing fixture: a router id must not poison sibling recovery.
+        (
+            &[
+                ("gemini-default", Some("Gemini 3.6 Flash (High)")),
+                ("", Some("Gemini 3.6 Flash (High)")),
+                ("gemini-3.6-flash", Some("Gemini 3.6 Flash (High)")),
+            ][..],
+            "gemini-3.6-flash",
+        ),
         // Different spellings of the same priced model are not ambiguous.
         (
             &[
@@ -600,6 +612,14 @@ fn antigravity_recovers_models_without_guessing_from_labels() {
             session.models[session.events[0].model as usize], expected,
             "{rows:?}"
         );
+        if rows[0].0 == "gemini-default" {
+            assert!(
+                session
+                    .events
+                    .iter()
+                    .all(|event| session.models[event.model as usize] == expected)
+            );
+        }
     }
 }
 
@@ -671,4 +691,173 @@ fn antigravity_prefers_legacy_timestamp_then_joins_steps_by_response_or_generati
             1_790_000_200_000, // Generation index joins when the response id is absent.
         ]
     );
+}
+
+#[test]
+fn claude_keeps_main_usage_and_valid_advisors_with_malformed_iterations() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("iterations.jsonl");
+    for iterations in [
+        serde_json::Value::Null,
+        serde_json::json!({"unexpected": true}),
+        serde_json::json!("invalid"),
+        serde_json::json!([
+            null, 42,
+            {"type": "advisor_message", "model": "advisor", "input_tokens": "invalid"},
+            {"type": "advisor_message", "model": "advisor", "input_tokens": 7}
+        ]),
+    ] {
+        let line = serde_json::json!({
+            "type": "assistant", "timestamp": "2026-10-01T10:00:00Z",
+            "message": {"id": "main", "model": "claude-opus-5-5", "usage": {
+                "input_tokens": 10, "output_tokens": 2, "iterations": iterations
+            }}
+        });
+        write(&path, &format!("{line}\n"));
+        let (session, _) = parse::parse_full(Tool::ClaudeCode, &path).unwrap();
+        assert_eq!(session.events[0].tokens.input, 10);
+        assert_eq!(session.events[0].tokens.output, 2);
+        if iterations.is_array() {
+            assert_eq!(session.events.len(), 2);
+            assert_eq!(session.events[1].tokens.input, 7);
+            assert_eq!(
+                session.events[1].key.as_deref(),
+                Some("message:main:advisor:3")
+            );
+        } else {
+            assert_eq!(session.events.len(), 1);
+        }
+    }
+}
+
+#[test]
+fn codex_service_tiers_follow_thread_snapshots_and_request_overrides() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tiers.jsonl");
+    let settings = [
+        r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"service_tier":"priority"}}}"#,
+        r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#,
+        r#"{"type":"turn_context","payload":{"service_tier":"default"}}"#,
+        r#"{"type":"turn_context","payload":{}}"#,
+        r#"{"type":"token_usage_record","payload":{"usage":{"service_tier":"default"}}}"#,
+        r#"{"type":"turn_context","payload":{}}"#,
+        r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{}}}"#,
+        r#"{"type":"turn_context","payload":{"service_tier":"priority"}}"#,
+        r#"{"type":"turn_context","payload":{}}"#,
+        r#"{"type":"event_msg","payload":{"type":"thread_settings_applied","service_tier":"priority"}}"#,
+    ];
+    write(
+        &path,
+        concat!(
+            r#"{"type":"session_meta","payload":{"id":"tiers"}}"#,
+            "\n",
+            r#"{"type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#,
+            "\n",
+        ),
+    );
+    let (mut session, cursor) = parse::parse_full(Tool::Codex, &path).unwrap();
+    let mut cursor = cursor.unwrap();
+    for (index, settings) in settings.iter().enumerate() {
+        append(
+            &path,
+            &format!(
+                "{settings}\n{}",
+                codex_count(
+                    "2026-10-01T10:00:01Z",
+                    (index as u64 + 1) * 100,
+                    80,
+                    40,
+                    20,
+                    5
+                )
+            ),
+        );
+        assert!(parse::parse_appended(&path, &mut session, &mut cursor).unwrap());
+    }
+    let serialized = serde_json::to_value(&session).unwrap();
+    let tiers: Vec<_> = serialized["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|event| event.get("tier").and_then(serde_json::Value::as_str))
+        .collect();
+    assert_eq!(
+        tiers,
+        [
+            Some("Priority"),
+            Some("Priority"),
+            None,
+            Some("Priority"),
+            None,
+            Some("Priority"),
+            None,
+            Some("Priority"),
+            None,
+            Some("Priority")
+        ]
+    );
+    for (parent, tier) in [
+        ("/payload", " FAST "),
+        ("/payload/info", "priority"),
+        ("/payload/info/last_token_usage", "priority"),
+        ("/payload/info/total_token_usage", "priority"),
+        ("/payload/usage", "priority"),
+    ] {
+        append(
+            &path,
+            "{\"type\":\"turn_context\",\"payload\":{\"service_tier\":\"default\"}}\n",
+        );
+        let mut count: serde_json::Value = serde_json::from_str(&codex_count(
+            "2026-10-01T10:00:02Z",
+            (session.events.len() as u64 + 1) * 100,
+            80,
+            40,
+            20,
+            5,
+        ))
+        .unwrap();
+        count["payload"]["usage"] = serde_json::json!({});
+        count
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .insert("service_tier".into(), tier.into());
+        append(&path, &format!("{count}\n"));
+        assert!(parse::parse_appended(&path, &mut session, &mut cursor).unwrap());
+        assert_eq!(session.events.last().unwrap().tier, ServiceTier::Priority);
+    }
+    let (full, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(session, full);
+    let mut legacy = serde_json::to_value(&session.events[0]).unwrap();
+    legacy.as_object_mut().unwrap().remove("tier");
+    let legacy: toktop::model::Event = serde_json::from_value(legacy).unwrap();
+    assert_eq!(legacy.tier, ServiceTier::Standard);
+
+    // Exercise the parser -> aggregation pricing path, including cached and reasoning tokens.
+    let prices = toktop::pricing::PriceTable::from_prices(std::collections::HashMap::from([(
+        "gpt-6.1-sol".into(),
+        toktop::pricing::Price {
+            input: 1.0,
+            output: 2.0,
+            cache_read: Some(0.25),
+            ..Default::default()
+        },
+    )]));
+    let expected: f64 = session
+        .events
+        .iter()
+        .map(|event| {
+            90.0 * if event.tier == ServiceTier::Priority {
+                2.0
+            } else {
+                1.0
+            }
+        })
+        .sum();
+    let mut store = toktop::store::Store::default();
+    store.insert_session(path, Tool::Codex, session);
+    let summary =
+        toktop::aggregate::summarize(&store, &prices, toktop::aggregate::Period::AllTime, 0);
+    assert_eq!(summary.total.cost, expected);
 }
