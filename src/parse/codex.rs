@@ -11,11 +11,10 @@
 //! `output_tokens`. They are split into disjoint [`Tokens`] buckets here.
 //!
 //! A forked thread (a subagent, or a user fork) may start by replaying the
-//! parent's turns, token counts included. Turn and session ids are UUIDv7,
-//! whose first 48 bits are the creation time in milliseconds, so a turn
-//! created before the fork itself is replayed history: its counts are not
-//! emitted but still advance the baseline, so the fork's own requests are
-//! measured from the inherited total.
+//! parent's turns, token counts included. UUIDv7 turn and session ids carry a
+//! creation time, so older turns are replayed history. Legacy turns require a
+//! child-local `task_started` announcement. Replayed counts set the baseline
+//! without emitting usage; known inherited snapshots cannot reset it later.
 //!
 //! Events are keyed by session id, timestamp and cumulative total, so a
 //! rollout present in both `sessions/` and `archived_sessions/` counts once.
@@ -23,6 +22,7 @@
 use super::{clamp, contains, parse_ts};
 use crate::model::{Event, LimitWindow, RateLimits, Session, Tokens};
 use serde::Deserialize;
+use std::collections::HashSet;
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -33,6 +33,10 @@ pub struct State {
     have_meta: bool,
     /// This fork's own session id, while its replayed parent history is skipped.
     replaying_before: Option<String>,
+    /// Child-local turns announced by `task_started` while the gate is closed.
+    task_started_turn_ids: HashSet<String>,
+    /// Cumulative totals seen in parent replay, which may be re-reported later.
+    inherited_totals: HashSet<u64>,
 }
 
 #[derive(Deserialize)]
@@ -52,6 +56,7 @@ struct Payload {
     parent_thread_id: Option<String>,
     source: Option<serde_json::Value>,
     turn_id: Option<String>,
+    started_at: Option<serde_json::Value>,
     cwd: Option<String>,
     model: Option<String>,
     info: Option<Info>,
@@ -105,6 +110,36 @@ impl Usage {
         })
     }
 
+    /// Advance the cumulative baseline after a last-only fallback row.
+    fn saturating_add(&self, last: &Usage) -> Usage {
+        let add = |before: Option<i64>, last: Option<i64>| {
+            Some(
+                before
+                    .unwrap_or(0)
+                    .max(0)
+                    .saturating_add(last.unwrap_or(0).max(0)),
+            )
+        };
+        Usage {
+            input_tokens: add(self.input_tokens, last.input_tokens),
+            cached_input_tokens: add(self.cached_input_tokens, last.cached_input_tokens),
+            cache_write_input_tokens: add(
+                self.cache_write_input_tokens,
+                last.cache_write_input_tokens,
+            ),
+            output_tokens: add(self.output_tokens, last.output_tokens),
+            reasoning_output_tokens: add(
+                self.reasoning_output_tokens,
+                last.reasoning_output_tokens,
+            ),
+            total_tokens: Some(
+                self.total()
+                    .saturating_add(last.total())
+                    .min(i64::MAX as u64) as i64,
+            ),
+        }
+    }
+
     fn tokens(&self) -> Tokens {
         let input = clamp(self.input_tokens);
         let cache_read = clamp(self.cached_input_tokens).min(input);
@@ -152,7 +187,8 @@ impl State {
         let token_count = contains(raw, b"\"token_count\"");
         let turn_context = !token_count && contains(raw, b"\"turn_context\"");
         let meta = !token_count && !self.have_meta && contains(raw, b"\"session_meta\"");
-        if !token_count && !turn_context && !meta {
+        let task_started = self.replaying_before.is_some() && contains(raw, b"\"task_started\"");
+        if !token_count && !turn_context && !meta && !task_started {
             return;
         }
         let Ok(line) = serde_json::from_slice::<Line>(raw) else {
@@ -171,7 +207,7 @@ impl State {
                             .is_some()
                     });
                 if forked {
-                    self.replaying_before = payload.id.clone().filter(|id| is_uuid(id));
+                    self.replaying_before = payload.id.clone();
                 }
                 if let Some(id) = payload.id {
                     session.id = id;
@@ -180,12 +216,33 @@ impl State {
             }
             Some("turn_context") => {
                 if let (Some(own), Some(turn)) = (&self.replaying_before, &payload.turn_id) {
-                    if is_uuid(turn) && uuid_ms(turn) >= uuid_ms(own) {
+                    if uuid_ms(own)
+                        .zip(uuid_ms(turn))
+                        .is_some_and(|(own, turn)| turn >= own)
+                        || self.task_started_turn_ids.contains(turn)
+                    {
                         self.replaying_before = None;
+                        self.task_started_turn_ids.clear();
                     }
                 }
                 if payload.model.is_some() {
                     self.model = payload.model;
+                }
+            }
+            Some("event_msg") if payload.kind.as_deref() == Some("task_started") => {
+                if let (Some(own), Some(turn)) = (&self.replaying_before, payload.turn_id) {
+                    let child_local = match (uuid_ms(own), uuid_ms(&turn)) {
+                        (Some(own), Some(turn)) => turn >= own,
+                        (Some(own), None) => payload
+                            .started_at
+                            .as_ref()
+                            .and_then(serde_json::Value::as_u64)
+                            .is_some_and(|started| started >= own / 1000),
+                        (None, _) => true,
+                    };
+                    if child_local {
+                        self.task_started_turn_ids.insert(turn);
+                    }
                 }
             }
             Some("event_msg") if payload.kind.as_deref() == Some("token_count") => {
@@ -206,6 +263,21 @@ impl State {
 
     fn token_count(&mut self, session: &mut Session, ts: i64, info: Info, replay: bool) {
         let total = info.total_token_usage;
+        if replay {
+            if let Some(total) = total {
+                self.inherited_totals.insert(total.total());
+                self.last_total = Some(total);
+            }
+            return;
+        }
+        if total.is_some_and(|total| {
+            self.inherited_totals.contains(&total.total())
+                && info
+                    .last_token_usage
+                    .is_none_or(|last| total.total() != last.total())
+        }) {
+            return;
+        }
         let request = match (total, info.last_token_usage, self.last_total) {
             (Some(total), Some(last), Some(previous)) => {
                 let (now, before, last_total) = (total.total(), previous.total(), last.total());
@@ -223,6 +295,13 @@ impl State {
                 {
                     return;
                 }
+                if now < before {
+                    self.inherited_totals.clear();
+                }
+                last
+            }
+            (None, Some(last), Some(previous)) => {
+                self.last_total = Some(previous.saturating_add(&last));
                 last
             }
             (_, Some(last), _) => last,
@@ -249,7 +328,7 @@ impl State {
             self.model = info.model;
         }
         let tokens = request.tokens();
-        if replay || tokens.is_empty() {
+        if tokens.is_empty() {
             return;
         }
         let model = session.model_index(self.model.as_deref().unwrap_or("unknown"));
@@ -259,21 +338,29 @@ impl State {
             model,
             tokens,
             key,
+            input_is_split: false,
+            cache_write_1h_raw: 0,
         });
     }
 }
 
-/// Creation-time prefix of a UUIDv7 (`xxxxxxxx-xxxx`), comparable as text.
-fn uuid_ms(uuid: &str) -> &str {
-    &uuid[..13]
+/// Creation time of a UUIDv7; legacy random UUIDs cannot order turns.
+fn uuid_ms(uuid: &str) -> Option<u64> {
+    if !is_uuid(uuid) || uuid.as_bytes()[14] != b'7' {
+        return None;
+    }
+    Some(
+        (u64::from_str_radix(&uuid[..8], 16).ok()? << 16)
+            | u64::from_str_radix(&uuid[9..13], 16).ok()?,
+    )
 }
 
-/// Lowercase hyphenated UUID.
+/// Hyphenated UUID.
 fn is_uuid(text: &str) -> bool {
     text.len() == 36
         && text.bytes().enumerate().all(|(index, byte)| match index {
             8 | 13 | 18 | 23 => byte == b'-',
-            _ => byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte),
+            _ => byte.is_ascii_hexdigit(),
         })
 }
 

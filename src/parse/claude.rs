@@ -18,19 +18,9 @@ use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub struct State {
-    seen: HashMap<Box<str>, Seen>,
+    seen: HashMap<Box<str>, usize>,
     /// Whether the title came from a user rename, which outranks AI titles.
     custom_title: bool,
-}
-
-#[derive(Debug)]
-struct Seen {
-    /// Index into `Session::events`.
-    index: usize,
-    /// Whether the stored input came from a copy that reported the cache split.
-    split: bool,
-    /// Largest 1-hour cache-write split seen, before clamping to the total.
-    cache_write_1h: u64,
 }
 
 #[derive(Deserialize)]
@@ -185,47 +175,28 @@ impl State {
         usage: &Usage,
         key: Option<String>,
     ) {
-        if let Some(seen) = key.as_deref().and_then(|key| self.seen.get_mut(key)) {
-            let event = &mut session.events[seen.index];
-            let tokens = &mut event.tokens;
-            let input = tokens.input;
-            tokens.max_merge(&usage.tokens());
-            tokens.input = match (usage.reports_split(), seen.split) {
-                (true, false) => usage
-                    .input_tokens
-                    .map_or(input, |value| value.max(0) as u64),
-                (false, true) => input,
-                _ => tokens.input,
-            };
-            seen.split |= usage.reports_split();
-            seen.cache_write_1h = seen.cache_write_1h.max(usage.cache_write_1h());
-            tokens.cache_write_1h = seen.cache_write_1h.min(tokens.cache_write);
+        let mut event = Event {
+            ts,
+            model: 0,
+            tokens: usage.tokens(),
+            key: key.map(Into::into),
+            input_is_split: usage.input_tokens.is_some() && usage.reports_split(),
+            cache_write_1h_raw: usage.cache_write_1h(),
+        };
+        if let Some(&index) = event.key.as_deref().and_then(|key| self.seen.get(key)) {
+            session.events[index].max_merge(&event);
             return;
         }
 
         // Locally generated placeholders (errors, interruptions) carry no real usage.
-        let tokens = usage.tokens();
-        if model.trim().is_empty() || model == "<synthetic>" || tokens.is_empty() {
+        if model.trim().is_empty() || model == "<synthetic>" || event.tokens.is_empty() {
             return;
         }
-        let model = session.model_index(model);
-        let key: Option<Box<str>> = key.map(Into::into);
-        if let Some(key) = &key {
-            self.seen.insert(
-                key.clone(),
-                Seen {
-                    index: session.events.len(),
-                    split: usage.reports_split(),
-                    cache_write_1h: usage.cache_write_1h(),
-                },
-            );
+        event.model = session.model_index(model);
+        if let Some(key) = &event.key {
+            self.seen.insert(key.clone(), session.events.len());
         }
-        session.events.push(Event {
-            ts,
-            model,
-            tokens,
-            key,
-        });
+        session.events.push(event);
     }
 }
 

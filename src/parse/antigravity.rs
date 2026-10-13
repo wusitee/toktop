@@ -6,7 +6,8 @@
 //! - root `#1` chatModel: `#4` usage, `#9.#4` legacy timestamp, `#19` model id
 //! - usage: `#1` system prompt + `#2` new input, `#5` cache read, `#9` output,
 //!   `#10` thinking (disjoint from `#9`), `#11` responseId
-//! - root `#2`: index into `steps`, whose `metadata.#1` is the step timestamp
+//! - root `#2`: index into `steps`, whose `metadata.#1` is the step timestamp;
+//!   planner responses also join by `metadata.#9.#11` or `metadata.#20.#3`
 //! - `trajectory_metadata_blob`: `#1.#1` workspace URI, `#2` created-at
 //!
 //! Titles come from `conversation_summaries.db` next to `conversations/`.
@@ -78,18 +79,20 @@ pub fn parse(path: &Path) -> io::Result<Session> {
     let step_times = if has("steps") {
         step_timestamps(&conn).map_err(to_io)?
     } else {
-        HashMap::new()
+        StepTimestamps::default()
     };
 
     let mut stmt = conn
-        .prepare("SELECT data FROM gen_metadata ORDER BY idx")
+        .prepare("SELECT idx, data FROM gen_metadata ORDER BY idx")
         .map_err(to_io)?;
     let rows = stmt
-        .query_map([], |row| row.get::<_, Vec<u8>>(0))
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
+        })
         .map_err(to_io)?;
     let mut seen = std::collections::HashSet::new();
     for blob in rows {
-        let blob = blob.map_err(to_io)?;
+        let (gen_index, blob) = blob.map_err(to_io)?;
         let Some(chat) = proto::bytes(&blob, 1) else {
             continue;
         };
@@ -117,13 +120,16 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             }
         }
 
-        let ts = step_index(&blob)
-            .and_then(|index| step_times.get(&index).copied())
+        let ts = proto::bytes(chat, 9)
+            .and_then(|generation| proto::bytes(generation, 4))
+            .and_then(proto::timestamp_ms)
+            .filter(|ts| *ts > 0)
+            .or_else(|| step_index(&blob).and_then(|index| step_times.by_step.get(&index).copied()))
             .or_else(|| {
-                proto::bytes(chat, 9)
-                    .and_then(|generation| proto::bytes(generation, 4))
-                    .and_then(proto::timestamp_ms)
+                key.as_deref()
+                    .and_then(|id| step_times.by_response.get(id).copied())
             })
+            .or_else(|| step_times.by_generation.get(&gen_index).copied())
             .unwrap_or(fallback_ms);
         let model = proto::string(chat, 19).unwrap_or("unknown").to_owned();
         let model = session.model_index(&model);
@@ -132,6 +138,8 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             model,
             tokens,
             key,
+            input_is_split: false,
+            cache_write_1h_raw: 0,
         });
     }
     Ok(session)
@@ -147,20 +155,51 @@ fn step_index(blob: &[u8]) -> Option<u64> {
     })
 }
 
-fn step_timestamps(conn: &Connection) -> rusqlite::Result<HashMap<u64, i64>> {
-    let mut stmt = conn.prepare("SELECT idx, metadata FROM steps")?;
+#[derive(Default)]
+struct StepTimestamps {
+    by_step: HashMap<u64, i64>,
+    by_response: HashMap<String, i64>,
+    by_generation: HashMap<i64, i64>,
+}
+
+fn step_timestamps(conn: &Connection) -> rusqlite::Result<StepTimestamps> {
+    let query = if conn.column_exists(None, "steps", "step_type")? {
+        "SELECT idx, step_type, metadata FROM steps"
+    } else {
+        "SELECT idx, 15, metadata FROM steps"
+    };
+    let mut stmt = conn.prepare(query)?;
     let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, i64>(0)?, row.get::<_, Option<Vec<u8>>>(1)?))
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, Option<i64>>(1)?,
+            row.get::<_, Option<Vec<u8>>>(2)?,
+        ))
     })?;
-    let mut times = HashMap::new();
+    let mut times = StepTimestamps::default();
     for row in rows {
-        let (index, metadata) = row?;
-        if let Some(ts) = metadata
-            .as_deref()
-            .and_then(|meta| proto::bytes(meta, 1))
+        let (index, step_type, metadata) = row?;
+        let Some(metadata) = metadata else { continue };
+        let Some(ts) = proto::bytes(&metadata, 1)
             .and_then(proto::timestamp_ms)
+            .filter(|ts| *ts > 0)
+        else {
+            continue;
+        };
+        times.by_step.insert(index as u64, ts);
+        // Response and generation joins belong to planner response steps.
+        if step_type != Some(15) {
+            continue;
+        }
+        if let Some(response) = proto::bytes(&metadata, 9).and_then(|meta| proto::string(meta, 11))
         {
-            times.insert(index as u64, ts);
+            times.by_response.insert(response.trim().to_owned(), ts);
+        }
+        if let Some(index) = proto::bytes(&metadata, 20)
+            .and_then(|meta| proto::varint(meta, 3))
+            .and_then(|index| i64::try_from(index).ok())
+        {
+            times.by_generation.insert(index, ts);
         }
     }
     Ok(times)

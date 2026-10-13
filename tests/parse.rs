@@ -26,6 +26,9 @@ const CLAUDE: &str = concat!(
     // reports the cache split and a 1-hour split larger than its partial total.
     r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":150,"output_tokens":1}}}"#,
     "\n",
+    // Cache fields without input must leave the bare input replaceable.
+    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"cache_read_input_tokens":100}}}"#,
+    "\n",
     r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
     "\n",
     // Final copy: full output, an advisor call listed in `iterations`.
@@ -208,7 +211,13 @@ fn timestamp(seconds: u64) -> Vec<u8> {
     out
 }
 
-fn generation(step: u64, usage: &[(u64, u64)], response_id: &str, model: &str) -> Vec<u8> {
+fn generation(
+    step: Option<u64>,
+    usage: &[(u64, u64)],
+    response_id: &str,
+    model: &str,
+    legacy_seconds: Option<u64>,
+) -> Vec<u8> {
     let mut usage_msg = Vec::new();
     for &(number, value) in usage {
         field_varint(&mut usage_msg, number, value);
@@ -217,9 +226,16 @@ fn generation(step: u64, usage: &[(u64, u64)], response_id: &str, model: &str) -
     let mut chat = Vec::new();
     field_bytes(&mut chat, 4, &usage_msg);
     field_bytes(&mut chat, 19, model.as_bytes());
+    if let Some(seconds) = legacy_seconds {
+        let mut generation = Vec::new();
+        field_bytes(&mut generation, 4, &timestamp(seconds));
+        field_bytes(&mut chat, 9, &generation);
+    }
     let mut root = Vec::new();
     field_bytes(&mut root, 1, &chat);
-    field_varint(&mut root, 2, step);
+    if let Some(step) = step {
+        field_varint(&mut root, 2, step);
+    }
     root
 }
 
@@ -250,10 +266,11 @@ fn antigravity_reads_generation_metadata() {
         .unwrap();
 
     let first = generation(
-        2,
+        Some(2),
         &[(1, 1000), (2, 500), (5, 200), (9, 30), (10, 70)],
         "resp-1",
         "gemini-3.8-flash-n",
+        None,
     );
     // The same response recorded twice must count once.
     for (idx, blob) in [first.clone(), first].iter().enumerate() {
@@ -288,5 +305,211 @@ fn antigravity_reads_generation_metadata() {
             cache_write_1h: 0,
             reasoning: 70,
         }
+    );
+}
+
+#[test]
+fn codex_nested_child_skips_replayed_legacy_uuid_v4_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout-child.jsonl");
+    // Ported from tokscale: the ancestor task_started predates the child.
+    let text = concat!(
+        r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"session_meta","payload":{"id":"019e5c03-1f5d-7000-8000-000000000001","forked_from_id":"019e5c03-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5c03-0000-7000-8000-000000000001","depth":2}}},"thread_source":"subagent","model_provider":"openai","cwd":"/repo"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"session_meta","payload":{"id":"019e5c03-0000-7000-8000-000000000001","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{"subagent":{"thread_spawn":{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}},"thread_source":"subagent","model_provider":"openai","cwd":"/repo"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"cli","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"event_msg","payload":{"type":"task_started","turn_id":"81d2f55b-894b-4d67-b75b-436ead477f65","started_at":1778017800}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.197Z","type":"turn_context","payload":{"turn_id":"81d2f55b-894b-4d67-b75b-436ead477f65","model":"gpt-5.5","cwd":"/repo"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.198Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330},"last_token_usage":{"input_tokens":300,"output_tokens":30,"total_tokens":330}}}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.610Z","type":"event_msg","payload":{"type":"task_started","turn_id":"019e5c03-2100-7000-8000-000000000001","started_at":1779660169}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.611Z","type":"turn_context","payload":{"turn_id":"019e5c03-2100-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+        "\n",
+        r#"{"timestamp":"2026-05-05T21:52:10.612Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":320,"output_tokens":32,"total_tokens":352},"last_token_usage":{"input_tokens":20,"output_tokens":2,"total_tokens":22}}}}"#,
+        "\n"
+    );
+    // Exercise both v7 and task_started-announced legacy child turns.
+    for own_turn in [
+        "019e5c03-2100-7000-8000-000000000001",
+        "71d2f55b-894b-4d67-b75b-436ead477f65",
+    ] {
+        write(
+            &path,
+            &text.replace("019e5c03-2100-7000-8000-000000000001", own_turn),
+        );
+        let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+        assert_eq!(
+            session
+                .events
+                .iter()
+                .map(|event| event.tokens.total())
+                .sum::<u64>(),
+            22
+        );
+    }
+}
+
+#[test]
+fn codex_token_count_advances_baseline_after_missing_total_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout-missing-total.jsonl");
+    let line1 = r#"{"timestamp":"2026-01-01T00:00:00Z","type":"turn_context","payload":{"model":"gpt-5.2"}}"#;
+    let line2 = r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5},"last_token_usage":{"input_tokens":100,"cached_input_tokens":20,"output_tokens":30,"reasoning_output_tokens":5}}}}"#;
+    let line3 = r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
+    let line4 = r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":110,"cached_input_tokens":22,"output_tokens":33,"reasoning_output_tokens":6},"last_token_usage":{"input_tokens":10,"cached_input_tokens":2,"output_tokens":3,"reasoning_output_tokens":1}}}}"#;
+    let content = format!("{}\n{}\n{}\n{}", line1, line2, line3, line4);
+    write(&path, &(content + "\n"));
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|event| event.tokens.total())
+            .sum::<u64>(),
+        143
+    );
+
+    // A total-only row must also diff from the advanced baseline.
+    write(
+        &path,
+        concat!(
+            r#"{"timestamp":"2026-01-01T00:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"total_tokens":100}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"last_token_usage":{"input_tokens":50,"total_tokens":50}}}}"#,
+            "\n",
+            r#"{"timestamp":"2026-01-01T00:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":200,"total_tokens":200}}}}"#,
+            "\n",
+        ),
+    );
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|event| event.tokens.total())
+            .sum::<u64>(),
+        200
+    );
+}
+
+#[test]
+fn codex_fork_skips_known_inherited_snapshots_after_own_context() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout-fork.jsonl");
+    let mut text = concat!(
+        r#"{"type":"session_meta","payload":{"id":"01a00000-0500-7000-8000-000000000000","forked_from_id":"01a00000-0000-7000-8000-000000000001"}}"#, "\n",
+        r#"{"type":"turn_context","payload":{"turn_id":"01a00000-0000-7000-8000-000000000002","model":"gpt-6.1-sol"}}"#, "\n",
+    ).to_owned();
+    text += &codex_count("2026-10-01T11:00:00Z", 9500, 450, 0, 50, 0);
+    text += &codex_count("2026-10-01T11:00:01Z", 10000, 450, 0, 50, 0);
+    text += concat!(
+        r#"{"type":"turn_context","payload":{"turn_id":"01a00000-0600-7000-8000-000000000000","model":"gpt-6.1-sol"}}"#,
+        "\n"
+    );
+    text += &codex_count("2026-10-01T11:00:02Z", 9500, 90, 0, 10, 0);
+    text += &codex_count("2026-10-01T11:00:03Z", 10000, 90, 0, 10, 0);
+    text += &codex_count("2026-10-01T11:00:04Z", 10100, 90, 0, 10, 0);
+    write(&path, &text);
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|event| event.tokens.total())
+            .sum::<u64>(),
+        100
+    );
+
+    // A genuine reset to the request's own size can equal an inherited total.
+    text += &codex_count("2026-10-01T11:00:05Z", 9500, 9400, 0, 100, 0);
+    write(&path, &text);
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|event| event.tokens.total())
+            .sum::<u64>(),
+        9600
+    );
+    // After compaction, the child's new totals can reuse inherited numbers.
+    text += &codex_count("2026-10-01T11:00:06Z", 10000, 450, 0, 50, 0);
+    write(&path, &text);
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|event| event.tokens.total())
+            .sum::<u64>(),
+        10100
+    );
+}
+
+#[test]
+fn antigravity_prefers_legacy_timestamp_then_joins_steps_by_response_or_generation() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("timestamps.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE trajectory_metadata_blob (data blob);
+         CREATE TABLE steps (idx integer, step_type integer, metadata blob);
+         CREATE TABLE gen_metadata (idx integer, data blob);",
+    )
+    .unwrap();
+    let mut meta = Vec::new();
+    field_bytes(&mut meta, 2, &timestamp(1_790_000_000));
+    conn.execute("INSERT INTO trajectory_metadata_blob VALUES (?1)", [&meta])
+        .unwrap();
+
+    for (index, seconds, response, generation) in [
+        (10, 1_790_000_100, "legacy", 0),
+        (11, 1_790_000_200, "response", 2),
+        (12, 1_790_000_300, "unmatched", 1),
+    ] {
+        let mut step = Vec::new();
+        field_bytes(&mut step, 1, &timestamp(seconds));
+        let mut response_meta = Vec::new();
+        field_bytes(&mut response_meta, 11, response.as_bytes());
+        field_bytes(&mut step, 9, &response_meta);
+        let mut generation_meta = Vec::new();
+        field_varint(&mut generation_meta, 3, generation);
+        field_bytes(&mut step, 20, &generation_meta);
+        conn.execute(
+            "INSERT INTO steps VALUES (?1, 15, ?2)",
+            rusqlite::params![index, step],
+        )
+        .unwrap();
+    }
+    for (index, step, response, legacy) in [
+        (0, Some(10), "legacy", Some(1_790_000_400)),
+        (1, None, "response", None),
+        (2, None, "generation", None),
+    ] {
+        let blob = generation(step, &[(1, 1)], response, "gemini-3.8-flash-n", legacy);
+        conn.execute(
+            "INSERT INTO gen_metadata VALUES (?1, ?2)",
+            rusqlite::params![index, blob],
+        )
+        .unwrap();
+    }
+    drop(conn);
+    let (session, _) = parse::parse_full(Tool::Antigravity, &path).unwrap();
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|event| event.ts)
+            .collect::<Vec<_>>(),
+        [
+            1_790_000_400_000, // Explicit legacy timestamp outranks every step join.
+            1_790_000_200_000, // Response id outranks the conflicting generation index.
+            1_790_000_200_000, // Generation index joins when the response id is absent.
+        ]
     );
 }

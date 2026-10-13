@@ -1,6 +1,6 @@
 //! Turns parsed sessions into the totals and breakdowns the UI shows.
 
-use crate::model::{RateLimits, Tokens, Tool};
+use crate::model::{Event, RateLimits, Tokens, Tool};
 use crate::pricing::{Price, PriceTable};
 use crate::store::Store;
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
@@ -169,14 +169,14 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
 
     // A response copied into several files (resumed or forked sessions) is
     // counted once, at its first copy, with the most complete counts seen.
-    let mut merged: HashMap<(Tool, &str), Tokens> = HashMap::new();
+    let mut merged: HashMap<(Tool, &str), Event> = HashMap::new();
     for (_, entry) in &files {
         for event in &entry.session.events {
             if let Some(key) = event.key.as_deref() {
                 merged
                     .entry((entry.tool, key))
-                    .and_modify(|tokens| tokens.max_merge(&event.tokens))
-                    .or_insert(event.tokens);
+                    .and_modify(|merged| merged.max_merge(event))
+                    .or_insert_with(|| event.clone());
             }
         }
     }
@@ -189,7 +189,7 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
             let tokens = match event.key.as_deref() {
                 // `remove` makes later copies miss and be skipped.
                 Some(key) => match merged.remove(&(entry.tool, key)) {
-                    Some(tokens) => tokens,
+                    Some(event) => event.tokens,
                     None => continue,
                 },
                 None => event.tokens,
@@ -209,7 +209,7 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
                 .or_default()
                 .add(&tokens, cost);
             if now_ms - event.ts <= RATE_WINDOW_MS && event.ts <= now_ms {
-                recent_tokens += tokens.total();
+                recent_tokens = recent_tokens.saturating_add(tokens.total());
             }
             if event.ts < start_ms {
                 continue;

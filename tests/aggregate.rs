@@ -98,6 +98,8 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
                     ..Tokens::default()
                 },
                 key: key.map(Into::into),
+                input_is_split: false,
+                cache_write_1h_raw: 0,
             })
             .collect(),
         limits: None,
@@ -168,4 +170,55 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(all.total.tokens.input, 130);
     assert_eq!(all.daily.len(), 3);
     assert_eq!(all.daily[0].date, last_month);
+}
+
+#[test]
+fn claude_cross_file_merge_preserves_input_and_raw_cache_splits() {
+    let dir = tempfile::tempdir().unwrap();
+    let copies = [
+        concat!(
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"input","model":"claude-opus-5-5","usage":{"input_tokens":42494}}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"cache","model":"claude-opus-5-5","usage":{"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
+            "\n",
+        ),
+        concat!(
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"input","model":"claude-opus-5-5","usage":{"input_tokens":265,"cache_read_input_tokens":42000,"output_tokens":120}}}"#,
+            "\n",
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"cache","model":"claude-opus-5-5","usage":{"cache_creation_input_tokens":40}}}"#,
+            "\n",
+        ),
+    ];
+    // Provenance survives serialization, and merging is independent of file order.
+    for order in [[0, 1], [1, 0]] {
+        let mut store = Store::default();
+        for (index, copy) in order.into_iter().enumerate() {
+            let path = dir.path().join(format!("{index}.jsonl"));
+            std::fs::write(&path, copies[copy]).unwrap();
+            let (session, _) = toktop::parse::parse_full(Tool::ClaudeCode, &path).unwrap();
+            let session = serde_json::from_slice(&serde_json::to_vec(&session).unwrap()).unwrap();
+            store.insert_session(path, Tool::ClaudeCode, session);
+        }
+        let summary = aggregate::summarize(&store, &PriceTable::default(), Period::AllTime, 0);
+        assert_eq!(summary.total.tokens.input, 265);
+        assert_eq!(summary.total.tokens.cache_write_1h, 30);
+    }
+}
+
+#[test]
+fn recent_token_rate_saturates() {
+    let now = ms(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(), 12);
+    let mut store = Store::default();
+    store.insert_session(
+        "/large.jsonl".into(),
+        Tool::Codex,
+        session(
+            "large",
+            "/work/app",
+            "gpt-6.1-sol",
+            vec![(now, u64::MAX, None), (now, 1, None)],
+        ),
+    );
+    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::AllTime, now);
+    assert_eq!(summary.rate_per_min, u64::MAX as f64 / 5.0);
 }

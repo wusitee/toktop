@@ -45,6 +45,10 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
 impl Tokens {
     pub fn total(&self) -> u64 {
         self.input
@@ -101,6 +105,31 @@ pub struct Event {
     /// appear in several files (resumed or forked sessions).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key: Option<Box<str>>,
+    /// Whether input came from a Claude copy reporting both input and cache fields.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub input_is_split: bool,
+    /// Raw Claude 1-hour cache-write maximum, before clamping to the total.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write_1h_raw: u64,
+}
+
+impl Event {
+    /// Merge copies of one response, preserving Claude's input/cache split.
+    pub fn max_merge(&mut self, other: &Event) {
+        let input = self.tokens.input;
+        self.tokens.max_merge(&other.tokens);
+        self.tokens.input = match (self.input_is_split, other.input_is_split) {
+            (false, true) => other.tokens.input,
+            (true, false) => input,
+            _ => self.tokens.input,
+        };
+        self.input_is_split |= other.input_is_split;
+        self.cache_write_1h_raw = self
+            .cache_write_1h_raw
+            .max(other.cache_write_1h_raw)
+            .max(self.tokens.cache_write_1h);
+        self.tokens.cache_write_1h = self.cache_write_1h_raw.min(self.tokens.cache_write);
+    }
 }
 
 /// Everything parsed from one source file: a single session's usage.
