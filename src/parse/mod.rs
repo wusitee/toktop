@@ -14,6 +14,10 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::path::Path;
 
+/// Longest plausible response time. Longer gaps mean the log missed the
+/// request start (an interrupted or resumed turn), so no duration is kept.
+pub const MAX_RESPONSE_MS: i64 = 15 * 60 * 1000;
+
 /// Resumable position in an append-only JSONL file, with the parser state
 /// needed to continue from it.
 #[derive(Debug)]
@@ -28,14 +32,14 @@ pub struct Cursor {
 #[derive(Debug)]
 pub enum LineState {
     Claude(claude::State),
-    Codex(codex::State),
+    Codex(Box<codex::State>),
 }
 
 impl LineState {
     fn new(tool: Tool) -> Option<Self> {
         match tool {
             Tool::ClaudeCode => Some(LineState::Claude(claude::State::default())),
-            Tool::Codex => Some(LineState::Codex(codex::State::default())),
+            Tool::Codex => Some(LineState::Codex(Box::default())),
             Tool::Antigravity => None,
         }
     }
@@ -124,6 +128,35 @@ pub(crate) fn parse_ts(value: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(value)
         .ok()
         .map(|time| time.timestamp_millis())
+}
+
+/// A user message as a fallback title: whitespace collapsed, at most 120
+/// characters. Injected context (tags, instruction files) yields `None`.
+pub(crate) fn prompt_title(text: &str) -> Option<String> {
+    let text = text.trim_start();
+    if text.is_empty()
+        || text.starts_with('<')
+        || text.starts_with("# AGENTS.md")
+        || text.starts_with("Caveat:")
+    {
+        return None;
+    }
+    let mut title = String::new();
+    for word in text.split_whitespace() {
+        if title.chars().count() + word.chars().count() > 120 {
+            title.push('…');
+            break;
+        }
+        if !title.is_empty() {
+            title.push(' ');
+        }
+        title.push_str(word);
+    }
+    // A single word longer than the limit.
+    if title.is_empty() || title == "…" {
+        title = text.chars().take(120).collect();
+    }
+    Some(title)
 }
 
 pub(crate) fn clamp(value: Option<i64>) -> u64 {

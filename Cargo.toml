@@ -7,6 +7,11 @@ description = "Native Linux desktop monitor for AI coding tool token usage"
 license = "MIT"
 repository = "https://github.com/wusitee/toktop"
 
+[features]
+default = ["layer-shell"]
+# Desktop widget on wlr-layer-shell compositors; links libgtk4-layer-shell.
+layer-shell = []
+
 [dependencies]
 adw = { package = "libadwaita", version = "=0.9.2", features = ["v1_6"] }
 async-channel = "=2.5.0"

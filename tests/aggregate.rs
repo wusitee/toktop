@@ -105,6 +105,7 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
         id: id.to_owned(),
         project: Some(project.to_owned()),
         title: None,
+        prompt: None,
         models: vec![model.to_owned()],
         events: events
             .into_iter()
@@ -119,8 +120,10 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
                 key: key.map(Into::into),
                 input_is_split: false,
                 cache_write_1h_raw: 0,
+                duration_ms: 0,
             })
             .collect(),
+        parent: None,
         limits: None,
     }
 }
@@ -194,6 +197,84 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(all.total.tokens.input, 130);
     assert_eq!(all.daily.len(), 3);
     assert_eq!(all.daily[0].date, last_month);
+}
+
+#[test]
+fn subagents_group_under_their_root_session_with_speed_and_streak() {
+    let today = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
+    let now = ms(today, 12);
+    let mut store = Store::default();
+    let timed = |mut session: Session, output: u64, duration_ms: u32| {
+        session.events[0].tokens.output = output;
+        session.events[0].duration_ms = duration_ms;
+        session
+    };
+    let root = timed(
+        session(
+            "root",
+            "/work/app",
+            "gpt-6.1-sol",
+            vec![(ms(today, 9), 10, None)],
+        ),
+        100,
+        2000,
+    );
+    let mut child = timed(
+        session(
+            "child",
+            "/work/app",
+            "gpt-6-luna",
+            vec![(ms(today, 10), 10, None)],
+        ),
+        300,
+        2000,
+    );
+    child.parent = Some("root".into());
+    // A nested subagent, and an untimed request that does not affect speed.
+    let mut grandchild = session(
+        "grandchild",
+        "/work/app",
+        "gpt-6-luna",
+        vec![(ms(today, 11), 10, None)],
+    );
+    grandchild.parent = Some("child".into());
+    grandchild.events[0].tokens.output = 5000;
+    store.insert_session("/root.jsonl".into(), Tool::Codex, root);
+    store.insert_session("/child.jsonl".into(), Tool::Codex, child);
+    store.insert_session("/grandchild.jsonl".into(), Tool::Codex, grandchild);
+    let yesterday = NaiveDate::from_ymd_opt(2026, 10, 13).unwrap();
+    store.insert_session(
+        "/old.jsonl".into(),
+        Tool::ClaudeCode,
+        session(
+            "old",
+            "/work/app",
+            "claude-opus-5-5",
+            vec![
+                (ms(yesterday, 9), 1, None),
+                (ms(today - chrono::Days::new(3), 9), 1, None),
+            ],
+        ),
+    );
+
+    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::Today, now);
+    assert_eq!(summary.sessions.len(), 1);
+    let row = &summary.sessions[0];
+    assert_eq!((row.id.as_str(), row.subagents), ("root", 2));
+    assert_eq!(row.models, ["gpt-6-luna", "gpt-6.1-sol"]);
+    assert_eq!(row.usage.requests, 3);
+    assert_eq!(row.last_activity, ms(today, 11));
+    assert_eq!(summary.total.speed(), Some(100.0));
+    assert_eq!(summary.streak_days, 2);
+
+    // Without usage today, a streak still runs through yesterday.
+    let day = |date| aggregate::DayRow {
+        date,
+        usage: aggregate::Usage::default(),
+    };
+    let daily = [day(today - chrono::Days::new(2)), day(yesterday)];
+    assert_eq!(aggregate::streak(&daily, today), 2);
+    assert_eq!(aggregate::streak(&daily[..1], today), 0);
 }
 
 #[test]

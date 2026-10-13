@@ -1,0 +1,200 @@
+/* toktop widget style. Override any rule or color in
+   ~/.config/toktop/style.css. */
+
+@define-color toktop_bg rgba(30, 35, 43, 0.92);
+@define-color toktop_fg #e6edf3;
+@define-color toktop_dim #8b949e;
+@define-color toktop_line rgba(255, 255, 255, 0.08);
+@define-color toktop_accent #58a6ff;
+@define-color toktop_live #3fb950;
+@define-color toktop_warn #f0883e;
+@define-color toktop_claude #d97757;
+@define-color toktop_openai #10a37f;
+@define-color toktop_gemini #4c8df6;
+@define-color toktop_deepseek #4d6bfe;
+@define-color toktop_other #8b949e;
+
+window.toktop {
+  background: none;
+  box-shadow: none;
+}
+
+window.toktop.windowed {
+  background-color: @toktop_bg;
+}
+
+.card {
+  background-color: @toktop_bg;
+  color: @toktop_fg;
+  border: 1px solid @toktop_line;
+  border-radius: 16px;
+  padding: 14px 18px 16px;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+window.toktop.windowed .card {
+  border: none;
+  border-radius: 0;
+  background: none;
+}
+
+.dim,
+.caption {
+  color: @toktop_dim;
+}
+
+.caption {
+  font-size: 10.5px;
+}
+
+.numeric {
+  font-feature-settings: "tnum";
+}
+
+.logo {
+  font-size: 20px;
+  font-weight: bold;
+}
+
+.dot {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 50%;
+  background-color: @toktop_other;
+}
+
+.dot.claude { background-color: @toktop_claude; }
+.dot.openai { background-color: @toktop_openai; }
+.dot.gemini { background-color: @toktop_gemini; }
+.dot.deepseek { background-color: @toktop_deepseek; }
+.dot.project { background-color: alpha(@toktop_fg, 0.35); }
+
+.live-dot {
+  min-width: 7px;
+  min-height: 7px;
+  background-color: alpha(@toktop_dim, 0.4);
+}
+
+.live-dot.active {
+  background-color: @toktop_live;
+}
+
+.switcher,
+.tabs {
+  background-color: alpha(black, 0.2);
+  border: 1px solid @toktop_line;
+  border-radius: 10px;
+  padding: 2px;
+}
+
+.switcher button,
+.tabs button {
+  min-height: 0;
+  padding: 3px 9px;
+  border-radius: 8px;
+  background: none;
+  box-shadow: none;
+  color: @toktop_dim;
+  font-size: 10.5px;
+  font-weight: normal;
+}
+
+.switcher button:hover,
+.tabs button:hover {
+  color: @toktop_fg;
+}
+
+.switcher button:checked,
+.tabs button:checked {
+  background-color: alpha(@toktop_fg, 0.12);
+  color: @toktop_fg;
+}
+
+.tabs {
+  margin-bottom: 6px;
+}
+
+.hero-caption {
+  margin-top: 14px;
+  letter-spacing: 1px;
+}
+
+.hero {
+  font-family: sans-serif;
+  font-size: 40px;
+  font-weight: 300;
+  font-feature-settings: "tnum";
+  margin: 2px 0;
+}
+
+.notice {
+  color: @toktop_warn;
+  margin-top: 2px;
+}
+
+.tiles {
+  margin: 12px 0 4px;
+}
+
+.tile {
+  background-color: alpha(black, 0.18);
+  border-radius: 10px;
+  padding: 6px 8px;
+}
+
+.tile-value {
+  font-size: 13px;
+  font-feature-settings: "tnum";
+}
+
+.section {
+  margin: 10px 0;
+}
+
+.section-header {
+  margin-bottom: 4px;
+}
+
+.section-title {
+  font-weight: bold;
+  letter-spacing: 1px;
+}
+
+separator {
+  background-color: @toktop_line;
+  min-height: 1px;
+}
+
+.row {
+  padding: 3px 0;
+}
+
+.indented {
+  margin-left: 18px;
+}
+
+.empty {
+  padding: 6px 0;
+}
+
+progressbar trough {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: alpha(@toktop_fg, 0.08);
+}
+
+progressbar progress {
+  min-height: 4px;
+  border-radius: 2px;
+  background-color: @toktop_accent;
+}
+
+progressbar.low progress {
+  background-color: @toktop_warn;
+}
+
+.heatmap,
+.trend {
+  color: @toktop_accent;
+}

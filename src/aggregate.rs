@@ -72,13 +72,36 @@ pub struct Usage {
     pub tokens: Tokens,
     pub cost: f64,
     pub requests: u64,
+    /// Output and reasoning tokens of requests with a known duration.
+    pub timed_tokens: u64,
+    /// Summed duration of those requests, in milliseconds.
+    pub timed_ms: u64,
 }
 
 impl Usage {
-    fn add(&mut self, tokens: &Tokens, cost: f64) {
+    fn add(&mut self, tokens: &Tokens, cost: f64, duration_ms: u32) {
         self.tokens += tokens;
         self.cost += cost;
         self.requests += 1;
+        if duration_ms > 0 {
+            self.timed_tokens = self
+                .timed_tokens
+                .saturating_add(tokens.output.saturating_add(tokens.reasoning));
+            self.timed_ms = self.timed_ms.saturating_add(u64::from(duration_ms));
+        }
+    }
+
+    fn merge(&mut self, other: &Usage) {
+        self.tokens += &other.tokens;
+        self.cost += other.cost;
+        self.requests += other.requests;
+        self.timed_tokens = self.timed_tokens.saturating_add(other.timed_tokens);
+        self.timed_ms = self.timed_ms.saturating_add(other.timed_ms);
+    }
+
+    /// Average output speed in tokens per second over timed requests.
+    pub fn speed(&self) -> Option<f64> {
+        (self.timed_ms > 0).then(|| self.timed_tokens as f64 * 1000.0 / self.timed_ms as f64)
     }
 }
 
@@ -90,13 +113,20 @@ pub struct Row {
     pub usage: Usage,
 }
 
+/// A session together with the subagent sessions it spawned.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionRow {
     pub tool: Tool,
+    /// Id of the top-level session.
+    pub id: String,
     pub title: String,
     pub project: Option<String>,
     pub last_activity: i64,
     pub usage: Usage,
+    /// Models used, most tokens first.
+    pub models: Vec<String>,
+    /// Subagent sessions with usage in the period.
+    pub subagents: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -119,6 +149,9 @@ pub struct Summary {
     pub daily: Vec<DayRow>,
     /// Tokens per minute over the last five minutes.
     pub rate_per_min: f64,
+    /// Consecutive days with usage, ending today, or yesterday when today
+    /// has none yet.
+    pub streak_days: u32,
     pub codex_limits: Option<RateLimits>,
     /// Models with usage in the period but no known price.
     pub unpriced: Vec<String>,
@@ -162,7 +195,48 @@ pub fn project_label(project: &str) -> String {
         .to_owned()
 }
 
-pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64) -> Summary {
+#[derive(Default)]
+struct Group<'a> {
+    usage: Usage,
+    last_activity: i64,
+    models: HashMap<&'a str, u64>,
+    subagents: u32,
+    /// Title or first prompt of the top-level session, when its file has
+    /// usage.
+    title: Option<&'a str>,
+    /// Title of a subagent, used when the top-level session has none.
+    fallback_title: Option<&'a str>,
+    project: Option<&'a str>,
+}
+
+/// Consecutive days with usage ending at `today`, or at yesterday when
+/// `today` has none. `daily` is sorted by date.
+pub fn streak(daily: &[DayRow], today: NaiveDate) -> u32 {
+    let mut expected = today;
+    let mut count = 0;
+    for day in daily.iter().rev() {
+        if day.date > expected {
+            continue;
+        }
+        if day.date != expected {
+            if count == 0 && expected == today && day.date == today - Days::new(1) {
+                expected = day.date;
+            } else {
+                break;
+            }
+        }
+        count += 1;
+        expected = expected - Days::new(1);
+    }
+    count
+}
+
+pub fn summarize<'a>(
+    store: &'a Store,
+    prices: &PriceTable,
+    period: Period,
+    now_ms: i64,
+) -> Summary {
     let today = local_date(now_ms);
     let start = period.start(today);
     let start_ms = if period == Period::AllTime {
@@ -206,18 +280,39 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
         }
     }
 
+    // Subagent sessions are grouped under their top-level session.
+    let parents: HashMap<(Tool, &str), &str> = files
+        .iter()
+        .filter_map(|(_, entry)| {
+            let parent = entry.session.parent.as_deref()?;
+            Some(((entry.tool, entry.session.id.as_str()), parent))
+        })
+        .collect();
+    let root = |tool: Tool, mut id: &'a str| {
+        // Bounded, in case of a parent cycle.
+        for _ in 0..16 {
+            match parents.get(&(tool, id)) {
+                Some(parent) => id = parent,
+                None => break,
+            }
+        }
+        id
+    };
+    let mut groups: HashMap<(Tool, &str), Group> = HashMap::new();
+
     for (_, entry) in files {
         let session = &entry.session;
         let mut session_usage = Usage::default();
+        let mut model_tokens: HashMap<&str, u64> = HashMap::new();
         let mut last_activity = i64::MIN;
         for event in &session.events {
-            let tokens = match event.key.as_deref() {
+            let (tokens, merged_duration) = match event.key.as_deref() {
                 // `remove` makes later copies miss and be skipped.
                 Some(key) => match merged.remove(&(entry.tool, key)) {
-                    Some(event) => event.tokens,
+                    Some(event) => (event.tokens, Some(event.duration_ms)),
                     None => continue,
                 },
-                None => event.tokens,
+                None => (event.tokens, None),
             };
             // Raw-only Claude snapshots remain pending until duplicates merge.
             if tokens.is_empty() {
@@ -233,10 +328,11 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
                 .or_insert_with(|| prices.lookup(model).copied());
             let cost = price.map_or(0.0, |price| price.cost(&tokens, event.tier));
 
+            let duration = merged_duration.unwrap_or(event.duration_ms);
             daily
                 .entry(local_date(event.ts))
                 .or_default()
-                .add(&tokens, cost);
+                .add(&tokens, cost, duration);
             if now_ms - event.ts <= RATE_WINDOW_MS && event.ts <= now_ms {
                 recent_tokens = recent_tokens.saturating_add(tokens.total());
             }
@@ -246,19 +342,24 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
             if price.is_none() && !prices.is_empty() {
                 unpriced.insert(model.to_owned());
             }
-            summary.total.add(&tokens, cost);
-            by_tool.entry(entry.tool).or_default().add(&tokens, cost);
+            summary.total.add(&tokens, cost, duration);
+            by_tool
+                .entry(entry.tool)
+                .or_default()
+                .add(&tokens, cost, duration);
             by_model
                 .entry(model.to_owned())
                 .or_default()
-                .add(&tokens, cost);
+                .add(&tokens, cost, duration);
             if let Some(project) = &session.project {
                 by_project
                     .entry(project.trim_end_matches('/').to_owned())
                     .or_default()
-                    .add(&tokens, cost);
+                    .add(&tokens, cost, duration);
             }
-            session_usage.add(&tokens, cost);
+            session_usage.add(&tokens, cost, duration);
+            let model_total = model_tokens.entry(model).or_default();
+            *model_total = model_total.saturating_add(tokens.total());
             last_activity = last_activity.max(event.ts);
         }
 
@@ -272,20 +373,51 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
         }
 
         if session_usage.requests > 0 {
-            let title = store
-                .titles
-                .get(&session.id)
-                .or(session.title.as_ref())
-                .cloned()
-                .unwrap_or_else(|| session.id.chars().take(8).collect());
-            summary.sessions.push(SessionRow {
-                tool: entry.tool,
-                title,
-                project: session.project.clone(),
-                last_activity,
-                usage: session_usage,
-            });
+            let root_id = root(entry.tool, &session.id);
+            let group = groups.entry((entry.tool, root_id)).or_default();
+            group.usage.merge(&session_usage);
+            group.last_activity = group.last_activity.max(last_activity);
+            for (model, tokens) in model_tokens {
+                let total = group.models.entry(model).or_default();
+                *total = total.saturating_add(tokens);
+            }
+            if root_id == session.id {
+                group.title = session.title.as_deref().or(session.prompt.as_deref());
+                group.project = session.project.as_deref();
+            } else {
+                group.subagents += 1;
+                group.fallback_title = group
+                    .fallback_title
+                    .or(session.title.as_deref())
+                    .or(session.prompt.as_deref());
+                group.project = group.project.or(session.project.as_deref());
+            }
         }
+    }
+
+    for ((tool, id), group) in groups {
+        let title = store
+            .titles
+            .get(id)
+            .map(String::as_str)
+            .or(group.title)
+            .or(group.fallback_title)
+            .map_or_else(|| id.chars().take(8).collect(), str::to_owned);
+        let mut models: Vec<(&str, u64)> = group.models.into_iter().collect();
+        models.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+        summary.sessions.push(SessionRow {
+            tool,
+            id: id.to_owned(),
+            title,
+            project: group.project.map(str::to_owned),
+            last_activity: group.last_activity,
+            usage: group.usage,
+            models: models
+                .into_iter()
+                .map(|(model, _)| model.to_owned())
+                .collect(),
+            subagents: group.subagents,
+        });
     }
 
     let mut tools: Vec<(Tool, Usage)> = by_tool.into_iter().collect();
@@ -317,14 +449,17 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
         }
         row.label = suffix.to_owned();
     }
-    summary
-        .sessions
-        .sort_by_key(|row| std::cmp::Reverse(row.last_activity));
+    summary.sessions.sort_by(|a, b| {
+        b.last_activity
+            .cmp(&a.last_activity)
+            .then_with(|| a.id.cmp(&b.id))
+    });
     let mut days: Vec<DayRow> = daily
         .into_iter()
         .map(|(date, usage)| DayRow { date, usage })
         .collect();
     days.sort_by_key(|day| day.date);
+    summary.streak_days = streak(&days, today);
     summary.daily = days;
     summary.rate_per_min = recent_tokens as f64 / (RATE_WINDOW_MS as f64 / 60_000.0);
     let mut unpriced: Vec<String> = unpriced.into_iter().collect();

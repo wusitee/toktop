@@ -19,7 +19,9 @@ fn append(path: &Path, text: &str) {
 }
 
 const CLAUDE: &str = concat!(
-    r#"{"type":"user","sessionId":"s1","cwd":"/work/app","timestamp":"2026-10-01T10:00:00Z"}"#,
+    r#"{"type":"user","isMeta":true,"sessionId":"s1","cwd":"/work/app","timestamp":"2026-09-30T10:00:00Z","message":{"role":"user","content":"Caveat: injected"}}"#,
+    "\n",
+    r#"{"type":"user","sessionId":"s1","cwd":"/work/app","timestamp":"2026-10-01T10:00:00Z","message":{"role":"user","content":[{"type":"text","text":"Fix  the\nbug"}]}}"#,
     "\n",
     // The raw 1-hour split arrives before any countable tokens.
     r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
@@ -55,7 +57,10 @@ fn claude_merges_streaming_duplicates_and_prefers_custom_titles() {
     assert_eq!(session.id, "s1");
     assert_eq!(session.project.as_deref(), Some("/work/app"));
     assert_eq!(session.title.as_deref(), Some("Renamed"));
+    assert_eq!(session.prompt.as_deref(), Some("Fix the bug"));
     assert_eq!(session.events.len(), 2);
+    // From the prompt to the response's last copy.
+    assert_eq!(session.events[0].duration_ms, 2000);
     assert_eq!(
         session.events[0].tokens,
         Tokens {
@@ -189,6 +194,52 @@ fn codex_counts_each_request_once_and_splits_overlapping_buckets() {
 }
 
 #[test]
+fn codex_request_duration_spans_input_to_last_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("rollout-timing.jsonl");
+    let item = |ts: &str, payload: &str| {
+        format!(r#"{{"timestamp":"{ts}","ordinal":1,"type":"response_item","payload":{payload}}}"#)
+            + "\n"
+    };
+    let mut text = String::new();
+    text += r#"{"timestamp":"2026-10-01T10:00:00Z","type":"turn_context","payload":{"model":"gpt-6.1-sol"}}"#;
+    text += "\n";
+    text += &item(
+        "2026-10-01T10:00:00Z",
+        r#"{"type":"message","id":"m1","role":"user","content":[{"type":"input_text","text":"<environment_context>"},{"type":"input_text","text":"Add a widget"}]}"#,
+    );
+    text += &item("2026-10-01T10:00:02Z", r#"{"type":"reasoning","id":"r1"}"#);
+    text += &item(
+        "2026-10-01T10:00:04Z",
+        r#"{"type":"function_call","name":"shell"}"#,
+    );
+    // The tool runs for 26 s; its output starts the next request.
+    text += &item(
+        "2026-10-01T10:00:30Z",
+        r#"{"type":"function_call_output","call_id":"c1"}"#,
+    );
+    text += &codex_count("2026-10-01T10:00:31Z", 1000, 900, 0, 100, 0);
+    text += &codex_count("2026-10-01T10:00:31Z", 1000, 900, 0, 100, 0);
+    text += &item(
+        "2026-10-01T10:00:33Z",
+        r#"{"type":"message","id":"m2","role":"assistant","content":[]}"#,
+    );
+    text += &codex_count("2026-10-01T10:00:34Z", 2000, 950, 0, 50, 0);
+    // A request whose start was not logged has no duration.
+    text += &codex_count("2026-10-01T10:00:40Z", 3000, 950, 0, 50, 0);
+    write(&path, &text);
+
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    let durations: Vec<u32> = session
+        .events
+        .iter()
+        .map(|event| event.duration_ms)
+        .collect();
+    assert_eq!(durations, [4000, 3000, 0]);
+    assert_eq!(session.prompt.as_deref(), Some("Add a widget"));
+}
+
+#[test]
 fn codex_fork_skips_replayed_parent_turns() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("rollout-fork.jsonl");
@@ -215,6 +266,10 @@ fn codex_fork_skips_replayed_parent_turns() {
 
     let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
     assert_eq!(session.id, "01a00000-0500-7fff-8000-000000000000");
+    assert_eq!(
+        session.parent.as_deref(),
+        Some("01a00000-0000-7000-8000-000000000001")
+    );
     assert_eq!(session.events.len(), 1);
     assert_eq!(session.events[0].tokens.total(), 500);
     assert_eq!(

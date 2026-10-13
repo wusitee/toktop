@@ -18,8 +18,13 @@
 //!
 //! Events are keyed by session id, timestamp and cumulative total, so a
 //! rollout present in both `sessions/` and `archived_sessions/` counts once.
+//!
+//! A request's duration runs from the latest input `response_item` (a user
+//! message or tool output) to the last model output item (reasoning, an
+//! assistant message or a tool call) before its `token_count`. Both are read
+//! from the line prefix, so other rows are never JSON-parsed.
 
-use super::{clamp, contains, parse_ts};
+use super::{clamp, contains, parse_ts, prompt_title};
 use crate::model::{Event, LimitWindow, RateLimits, ServiceTier, Session, Tokens};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
@@ -40,6 +45,11 @@ pub struct State {
     task_started_turn_ids: HashSet<String>,
     /// Cumulative totals seen in parent replay, which may be re-reported later.
     inherited_totals: HashSet<u64>,
+    /// Latest input item, the start of the current request.
+    request_start: Option<i64>,
+    /// Latest output item of the current request.
+    response_end: Option<i64>,
+    last_input: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -218,6 +228,15 @@ impl Window {
 
 impl State {
     pub fn line(&mut self, session: &mut Session, raw: &[u8]) {
+        if let Some((ts, item)) = response_item(raw) {
+            if matches!(item, Item::UserMessage)
+                && session.prompt.is_none()
+                && self.replaying_before.is_none()
+            {
+                session.prompt = user_prompt(raw);
+            }
+            self.timing(ts, item);
+        }
         let token_count = contains(raw, b"\"token_count\"");
         let turn_context = !token_count && contains(raw, b"\"turn_context\"");
         let meta = !token_count && !self.have_meta && contains(raw, b"\"session_meta\"");
@@ -253,6 +272,12 @@ impl State {
                 if forked {
                     self.replaying_before = payload.id.clone();
                 }
+                session.parent = payload.source.as_ref().and_then(|source| {
+                    source
+                        .pointer("/subagent/thread_spawn/parent_thread_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                });
                 if let Some(id) = payload.id {
                     session.id = id;
                 }
@@ -310,15 +335,57 @@ impl State {
                 if let Some(limits) = payload.rate_limits.filter(|_| !replay) {
                     record_limits(session, ts, limits);
                 }
+                let duration = self.finish_request();
                 if let Some(info) = payload.info {
-                    self.token_count(session, ts, info, replay);
+                    self.token_count(session, ts, info, replay, duration);
                 }
             }
             _ => {}
         }
     }
 
-    fn token_count(&mut self, session: &mut Session, ts: i64, info: Info, replay: bool) {
+    fn timing(&mut self, ts: i64, item: Item) {
+        match item {
+            Item::Input | Item::UserMessage => {
+                self.last_input = Some(ts);
+                // Tool outputs after the model's output belong to this
+                // request; they start the next one.
+                if self.response_end.is_none() {
+                    self.request_start = Some(ts);
+                }
+            }
+            Item::Output => {
+                self.response_end = Some(ts);
+                if self.request_start.is_none() {
+                    self.request_start = self.last_input;
+                }
+            }
+        }
+    }
+
+    /// Ends the current request at a `token_count` row and returns its
+    /// duration in milliseconds, 0 when unknown.
+    fn finish_request(&mut self) -> u32 {
+        let Some(end) = self.response_end.take() else {
+            return 0;
+        };
+        let duration = self
+            .request_start
+            .map(|start| end - start)
+            .filter(|ms| *ms > 0 && *ms <= super::MAX_RESPONSE_MS)
+            .map_or(0, |ms| ms as u32);
+        self.request_start = self.last_input.filter(|input| *input > end);
+        duration
+    }
+
+    fn token_count(
+        &mut self,
+        session: &mut Session,
+        ts: i64,
+        info: Info,
+        replay: bool,
+        duration_ms: u32,
+    ) {
         let total = info.total_token_usage;
         if replay {
             if let Some(total) = total {
@@ -399,8 +466,76 @@ impl State {
             key,
             input_is_split: false,
             cache_write_1h_raw: 0,
+            duration_ms,
         });
     }
+}
+
+enum Item {
+    Input,
+    UserMessage,
+    Output,
+}
+
+#[derive(Deserialize)]
+struct MessageLine {
+    payload: MessagePayload,
+}
+
+#[derive(Deserialize)]
+struct MessagePayload {
+    #[serde(default)]
+    content: Vec<ContentItem>,
+}
+
+#[derive(Deserialize)]
+struct ContentItem {
+    text: Option<String>,
+}
+
+/// First typed text of a user message; injected context yields `None`.
+fn user_prompt(raw: &[u8]) -> Option<String> {
+    let line: MessageLine = serde_json::from_slice(raw).ok()?;
+    line.payload
+        .content
+        .iter()
+        .find_map(|item| prompt_title(item.text.as_deref()?))
+}
+
+/// Timestamp and direction of a `response_item` row, read from its prefix:
+/// `{"timestamp":"…",…"type":"response_item","payload":{"type":"…",…`.
+fn response_item(raw: &[u8]) -> Option<(i64, Item)> {
+    const TS: &[u8] = b"{\"timestamp\":\"";
+    const KIND: &[u8] = b"\"type\":\"response_item\",\"payload\":{\"type\":\"";
+    let head = &raw[..raw.len().min(320)];
+    let ts_start = TS.len();
+    if !head.starts_with(TS) {
+        return None;
+    }
+    let ts_len = memchr::memchr(b'"', &head[ts_start..])?;
+    let kind_start = memchr::memmem::find(head, KIND)? + KIND.len();
+    let kind_len = memchr::memchr(b'"', &head[kind_start..])?;
+    let kind = &head[kind_start..kind_start + kind_len];
+    let item = match kind {
+        b"function_call_output" | b"custom_tool_call_output" => Item::Input,
+        b"message" => {
+            let rest = &head[kind_start + kind_len..];
+            if contains(rest, b"\"role\":\"assistant\"") {
+                Item::Output
+            } else if contains(rest, b"\"role\":\"user\"") {
+                Item::UserMessage
+            } else if contains(rest, b"\"role\":\"") {
+                Item::Input
+            } else {
+                return None;
+            }
+        }
+        b"reasoning" => Item::Output,
+        kind if kind.ends_with(b"_call") => Item::Output,
+        _ => return None,
+    };
+    let ts = parse_ts(std::str::from_utf8(&head[ts_start..ts_start + ts_len]).ok()?)?;
+    Some((ts, item))
 }
 
 fn service_tier<'de, D: Deserializer<'de>>(

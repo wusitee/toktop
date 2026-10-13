@@ -12,7 +12,7 @@ use std::sync::mpsc;
 use toktop::aggregate::Period;
 
 pub enum Command {
-    /// Show the window, or close it if it has focus.
+    /// Show or hide the widget.
     Toggle,
     Show,
     Period(Period),
@@ -75,7 +75,7 @@ impl ksni::Tray for Item {
             .unwrap_or(0);
         vec![
             StandardItem {
-                label: "Show window".into(),
+                label: "Show widget".into(),
                 activate: Box::new(|item: &mut Self| item.send(Command::Show)),
                 ..StandardItem::default()
             }
