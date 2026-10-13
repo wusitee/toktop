@@ -1031,3 +1031,46 @@ fn codex_service_tiers_follow_thread_snapshots_and_request_overrides() {
         toktop::aggregate::summarize(&store, &prices, toktop::aggregate::Period::AllTime, 0);
     assert_eq!(summary.total.cost, expected);
 }
+
+#[test]
+fn pi_reads_normalized_usage_titles_and_response_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("2026-10-01T10-00-00-000Z_p1.jsonl");
+    let text = concat!(
+        r#"{"type":"session","version":3,"id":"p1","timestamp":"2026-10-01T10:00:00.000Z","cwd":"/work/app"}"#,
+        "\n",
+        r#"{"type":"message","id":"a1","parentId":null,"timestamp":"2026-10-01T10:00:01.000Z","message":{"role":"user","content":[{"type":"text","text":"Add  a\nwidget"}],"timestamp":1790848801000}}"#,
+        "\n",
+        // Output includes reasoning; the response started at the message timestamp.
+        r#"{"type":"message","id":"a2","parentId":"a1","timestamp":"2026-10-01T10:00:04.000Z","message":{"role":"assistant","model":"mimo-v2.6-pro","responseId":"r1","usage":{"input":100,"output":50,"cacheRead":900,"cacheWrite":40,"cacheWrite1h":10,"reasoning":20,"totalTokens":1090},"timestamp":1790848801000}}"#,
+        "\n",
+        // A failed request without usage is not an event.
+        r#"{"type":"message","id":"a3","parentId":"a2","timestamp":"2026-10-01T10:00:05.000Z","message":{"role":"assistant","model":"mimo-v2.6-pro","stopReason":"error","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0},"timestamp":1790848804000}}"#,
+        "\n",
+        r#"{"type":"session_info","id":"a4","parentId":"a3","timestamp":"2026-10-01T10:00:06.000Z","name":"Widget work"}"#,
+        "\n",
+    );
+    write(&path, text);
+
+    let (session, _) = parse::parse_full(Tool::Pi, &path).unwrap();
+    assert_eq!(session.id, "p1");
+    assert_eq!(session.project.as_deref(), Some("/work/app"));
+    assert_eq!(session.title.as_deref(), Some("Widget work"));
+    assert_eq!(session.prompt.as_deref(), Some("Add a widget"));
+    assert_eq!(session.models, ["mimo-v2.6-pro"]);
+    assert_eq!(session.events.len(), 1);
+    let event = &session.events[0];
+    assert_eq!(
+        event.tokens,
+        Tokens {
+            input: 100,
+            output: 30,
+            cache_read: 900,
+            cache_write: 40,
+            cache_write_1h: 10,
+            reasoning: 20,
+        }
+    );
+    assert_eq!(event.key.as_deref(), Some("response:r1"));
+    assert_eq!(event.duration_ms, 3000);
+}

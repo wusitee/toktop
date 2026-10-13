@@ -5,7 +5,7 @@ Settings live in `$XDG_CONFIG_HOME/toktop/config.toml` (default `~/.config/tokto
 ```toml
 period = "today"                               # today, week, 7d, month, 30d or all
 tray = true                                    # show a tray icon when a panel supports it
-tools = ["claude-code", "codex", "antigravity"]
+tools = ["claude-code", "codex", "antigravity", "pi"]
 
 [widget]
 layer = "bottom"      # background, bottom, top, overlay or window
@@ -21,7 +21,7 @@ sessions = 5
 |---|---|---|
 | `period` | `"today"` | Period shown at startup. Changing the period in the widget or the tray menu saves it. |
 | `tray` | `true` | Register a StatusNotifierItem tray icon. Needs a panel that hosts one, such as waybar, KDE Plasma, or GNOME with the AppIndicator extension. |
-| `tools` | all three | Tools whose logs are read and watched. Disabled tools are not scanned. |
+| `tools` | all four | Tools whose logs are read and watched. Disabled tools are not scanned. |
 | `widget.layer` | `"bottom"` | Where the widget lives; see [Layers](#layers). |
 | `widget.anchor` | `"top-right"` | Screen position of a layer widget. |
 | `widget.margin` | `16` | Distance in pixels from the anchored edges. |
@@ -70,7 +70,7 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 | `toktop_bg`, `toktop_fg`, `toktop_dim`, `toktop_line` | Card background, text, secondary text, separators and borders |
 | `toktop_accent` | Heatmap, trend line and limit bars (the charts draw in the CSS `color` of `.heatmap` and `.trend`) |
 | `toktop_live`, `toktop_warn` | Live indicator; price notices and nearly exhausted limits |
-| `toktop_claude`, `toktop_openai`, `toktop_gemini`, `toktop_deepseek`, `toktop_other` | Model and tool dots (`.dot.claude`, …) |
+| `toktop_claude`, `toktop_openai`, `toktop_gemini`, `toktop_deepseek`, `toktop_pi`, `toktop_other` | Model and tool dots (`.dot.claude`, …) |
 
 ## Command line
 
@@ -85,5 +85,5 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 
 | Variable | Effect |
 |---|---|
-| `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | Tool data locations; see [sources.md](sources.md). |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR` | Tool data locations; see [sources.md](sources.md). |
 | `TOKTOP_DEBUG` | Log window and application lifecycle events to stderr; see [architecture.md](architecture.md#debugging). |

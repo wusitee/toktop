@@ -6,5 +6,5 @@ Exec=toktop
 Icon=utilities-system-monitor
 Terminal=false
 Categories=Development;Monitor;
-Keywords=tokens;claude;codex;antigravity;usage;
+Keywords=tokens;claude;codex;antigravity;pi;usage;
 StartupNotify=true
