@@ -178,10 +178,8 @@ impl<E: FnMut(Summary)> State<E> {
             {
                 first_change = None;
                 let changed = if std::mem::take(&mut rescan) {
+                    // The watcher has already reconciled its watches.
                     pending.clear();
-                    if let Ok(watcher) = &watcher {
-                        watcher.reconcile();
-                    }
                     let changed = self.store.sync_all();
                     trim_heap();
                     changed

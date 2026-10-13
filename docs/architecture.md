@@ -10,7 +10,7 @@ toktop reads the local logs of AI coding tools, turns them into usage events and
 | `toktop-worker` | Registers the watcher before the initial scan, owns the `Store`, applies file changes and sends summaries when data changes or the clock ticks. |
 | `toktop-watch` | Blocks on inotify and forwards changed paths to the worker. |
 
-The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Session relative times and Codex limit countdowns refresh on every tick; breakdown lists rebuild only when their data, total-token denominator or pricing availability changes.
+The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The UI updates row text in place while a list keeps the same rows in the same order, and rebuilds the list only when rows appear, disappear, reorder or gain detail rows. This keeps focus, scroll position and expansion through live updates and keeps per-update CPU low.
 
 ## Data flow
 

@@ -122,17 +122,64 @@ struct Ui {
     total: gtk::Label,
     detail: gtk::Label,
     rate: gtk::Label,
-    tools: gtk::ListBox,
+    tools: UsageList,
     limits_group: adw::PreferencesGroup,
     limits: gtk::ListBox,
     chart: chart::Chart,
-    models: gtk::ListBox,
-    projects: gtk::ListBox,
-    sessions: gtk::ListBox,
+    models: UsageList,
+    projects: UsageList,
+    sessions: SessionList,
     /// Stable keys of expanded breakdown rows, kept across list rebuilds.
     expanded: Rc<RefCell<HashSet<String>>>,
-    /// Last rendered summary; lists are rebuilt only when their data changes.
-    shown: RefCell<Option<Summary>>,
+}
+
+/// Token buckets shown in an expanded usage row.
+const BUCKETS: [&str; 5] = ["Input", "Output", "Reasoning", "Cache read", "Cache write"];
+
+fn bucket_values(tokens: &toktop::model::Tokens) -> [u64; 5] {
+    [
+        tokens.input,
+        tokens.output,
+        tokens.reasoning,
+        tokens.cache_read,
+        tokens.cache_write,
+    ]
+}
+
+/// Widgets of one usage row whose text can change in place.
+struct UsageRowWidgets {
+    row: adw::ExpanderRow,
+    total: gtk::Label,
+    /// One label per nonzero bucket, in `BUCKETS` order.
+    buckets: Vec<gtk::Label>,
+    hit_rate: Option<gtk::Label>,
+}
+
+/// Row structure that can be updated without rebuilding: key, nonzero
+/// buckets and whether a cache hit rate is shown.
+type UsageShape = (String, [bool; 5], bool);
+
+/// A breakdown list. Updates change row text in place while the rows keep the
+/// same keys, order and detail rows, so focus, scroll and expansion survive
+/// live updates; anything else rebuilds the list.
+struct UsageList {
+    list: gtk::ListBox,
+    kind: &'static str,
+    shape: RefCell<Vec<UsageShape>>,
+    rows: RefCell<Vec<UsageRowWidgets>>,
+}
+
+struct SessionRowWidgets {
+    row: adw::ActionRow,
+    tokens: gtk::Label,
+    cost: gtk::Label,
+}
+
+/// Recent sessions, updated in place while their identities and order hold.
+struct SessionList {
+    list: gtk::ListBox,
+    shape: RefCell<Vec<(toktop::model::Tool, String, Option<String>)>>,
+    rows: RefCell<Vec<SessionRowWidgets>>,
 }
 
 impl Ui {
@@ -241,15 +288,18 @@ impl Ui {
             total,
             detail,
             rate,
-            tools,
+            tools: UsageList::new(tools, "tool"),
             limits_group,
             limits,
             chart,
-            models,
-            projects,
-            sessions,
+            models: UsageList::new(models, "model"),
+            projects: UsageList::new(projects, "project"),
+            sessions: SessionList {
+                list: sessions,
+                shape: RefCell::default(),
+                rows: RefCell::default(),
+            },
             expanded: Rc::default(),
-            shown: RefCell::default(),
         }
     }
 
@@ -295,51 +345,31 @@ impl Ui {
             self.banner.set_revealed(true);
         }
 
-        let previous = self.shown.replace(Some(summary.clone()));
-        let previous = previous.as_ref();
         let total_tokens = total.tokens.total().max(1) as f64;
-        let context_changed = previous.is_none_or(|before| {
-            before.total.tokens.total() != total.tokens.total()
-                || before.prices_available != summary.prices_available
-        });
-        if context_changed || previous.is_none_or(|before| before.by_tool != summary.by_tool) {
-            self.fill(
-                &self.tools,
-                summary.by_tool.iter().map(|(tool, usage)| {
-                    (
-                        format!("{tool:?}"),
-                        tool.label().to_owned(),
-                        usage,
-                        usage.tokens.total() as f64 / total_tokens,
-                    )
-                }),
-                "tool",
-                summary.prices_available,
-            );
-        }
-        if context_changed || previous.is_none_or(|before| before.by_model != summary.by_model) {
-            self.fill(
-                &self.models,
-                rows(&summary.by_model, total_tokens),
-                "model",
-                summary.prices_available,
-            );
-        }
-        if context_changed || previous.is_none_or(|before| before.by_project != summary.by_project)
-        {
-            self.fill(
-                &self.projects,
-                rows(&summary.by_project, total_tokens),
-                "project",
-                summary.prices_available,
-            );
-        }
-        // Session rows show relative times, so they also refresh on the tick.
-        self.sessions.remove_all();
-        for session in summary.sessions.iter().take(MAX_SESSIONS) {
-            self.sessions
-                .append(&session_row(session, now, summary.prices_available));
-        }
+        let available = summary.prices_available;
+        self.tools.set(
+            summary.by_tool.iter().map(|(tool, usage)| {
+                (
+                    format!("{tool:?}"),
+                    tool.label().to_owned(),
+                    usage,
+                    usage.tokens.total() as f64 / total_tokens,
+                )
+            }),
+            available,
+            &self.expanded,
+        );
+        self.models.set(
+            rows(&summary.by_model, total_tokens),
+            available,
+            &self.expanded,
+        );
+        self.projects.set(
+            rows(&summary.by_project, total_tokens),
+            available,
+            &self.expanded,
+        );
+        self.sessions.set(&summary.sessions, now, available);
 
         self.update_limits(summary, now);
 
@@ -363,31 +393,6 @@ impl Ui {
             })
             .collect();
         self.chart.set(days);
-    }
-
-    fn fill<'a>(
-        &self,
-        list: &gtk::ListBox,
-        rows: impl Iterator<Item = (String, String, &'a Usage, f64)>,
-        kind: &str,
-        prices_available: bool,
-    ) {
-        list.remove_all();
-        for (key, title, usage, share) in rows {
-            let key = format!("{kind}:{key}");
-            let row = usage_row(&title, usage, share, prices_available);
-            row.set_expanded(self.expanded.borrow().contains(&key));
-            let expanded = self.expanded.clone();
-            row.connect_expanded_notify(move |row| {
-                let mut set = expanded.borrow_mut();
-                if row.is_expanded() {
-                    set.insert(key.clone());
-                } else {
-                    set.remove(&key);
-                }
-            });
-            list.append(&row);
-        }
     }
 
     fn update_limits(&self, summary: &Summary, now_ms: i64) {
@@ -422,51 +427,139 @@ fn rows(rows: &[Row], total: f64) -> impl Iterator<Item = (String, String, &Usag
     })
 }
 
-fn usage_row(title: &str, usage: &Usage, share: f64, prices_available: bool) -> adw::ExpanderRow {
+fn usage_subtitle(usage: &Usage, share: f64, prices_available: bool) -> String {
+    format!(
+        "{} · {} · {} req",
+        format::percent(share),
+        display_cost(usage.cost, prices_available),
+        usage.requests
+    )
+}
+
+fn usage_shape(key: &str, usage: &Usage) -> UsageShape {
+    (
+        key.to_owned(),
+        bucket_values(&usage.tokens).map(|value| value > 0),
+        usage.tokens.cache_hit_rate().is_some(),
+    )
+}
+
+fn usage_row(title: &str, usage: &Usage, share: f64, prices_available: bool) -> UsageRowWidgets {
     let row = adw::ExpanderRow::builder()
         .title(title)
         .use_markup(false)
-        .subtitle(format!(
-            "{} · {} · {} req",
-            format::percent(share),
-            display_cost(usage.cost, prices_available),
-            usage.requests
-        ))
+        .subtitle(usage_subtitle(usage, share, prices_available))
         .build();
-    row.add_suffix(&numeric(&format::tokens(usage.tokens.total())));
-    let tokens = &usage.tokens;
-    for (name, value) in [
-        ("Input", tokens.input),
-        ("Output", tokens.output),
-        ("Reasoning", tokens.reasoning),
-        ("Cache read", tokens.cache_read),
-        ("Cache write", tokens.cache_write),
-    ] {
+    let total = numeric(&format::tokens(usage.tokens.total()));
+    row.add_suffix(&total);
+    let mut buckets = Vec::new();
+    for (name, value) in BUCKETS.into_iter().zip(bucket_values(&usage.tokens)) {
         if value > 0 {
             let detail = adw::ActionRow::builder().title(name).build();
-            detail.add_suffix(&numeric(&format::tokens(value)));
+            let label = numeric(&format::tokens(value));
+            detail.add_suffix(&label);
             row.add_row(&detail);
+            buckets.push(label);
         }
     }
-    if let Some(rate) = tokens.cache_hit_rate() {
+    let hit_rate = usage.tokens.cache_hit_rate().map(|rate| {
         let detail = adw::ActionRow::builder().title("Cache hit rate").build();
-        detail.add_suffix(&numeric(&format::percent(rate)));
+        let label = numeric(&format::percent(rate));
+        detail.add_suffix(&label);
         row.add_row(&detail);
+        label
+    });
+    UsageRowWidgets {
+        row,
+        total,
+        buckets,
+        hit_rate,
     }
-    row
 }
 
-fn session_row(session: &SessionRow, now_ms: i64, prices_available: bool) -> adw::ActionRow {
+impl UsageList {
+    fn new(list: gtk::ListBox, kind: &'static str) -> Self {
+        UsageList {
+            list,
+            kind,
+            shape: RefCell::default(),
+            rows: RefCell::default(),
+        }
+    }
+
+    fn set<'a>(
+        &self,
+        items: impl Iterator<Item = (String, String, &'a Usage, f64)>,
+        prices_available: bool,
+        expanded: &Rc<RefCell<HashSet<String>>>,
+    ) {
+        let items: Vec<_> = items.collect();
+        let shape: Vec<UsageShape> = items
+            .iter()
+            .map(|(key, _, usage, _)| usage_shape(key, usage))
+            .collect();
+        if *self.shape.borrow() == shape {
+            for ((_, title, usage, share), widgets) in items.iter().zip(self.rows.borrow().iter()) {
+                widgets.row.set_title(title);
+                widgets
+                    .row
+                    .set_subtitle(&usage_subtitle(usage, *share, prices_available));
+                widgets
+                    .total
+                    .set_label(&format::tokens(usage.tokens.total()));
+                let values = bucket_values(&usage.tokens)
+                    .into_iter()
+                    .filter(|value| *value > 0);
+                for (label, value) in widgets.buckets.iter().zip(values) {
+                    label.set_label(&format::tokens(value));
+                }
+                if let (Some(label), Some(rate)) =
+                    (&widgets.hit_rate, usage.tokens.cache_hit_rate())
+                {
+                    label.set_label(&format::percent(rate));
+                }
+            }
+            return;
+        }
+
+        self.list.remove_all();
+        let mut rows = Vec::with_capacity(items.len());
+        for (key, title, usage, share) in &items {
+            let key = format!("{}:{key}", self.kind);
+            let widgets = usage_row(title, usage, *share, prices_available);
+            widgets.row.set_expanded(expanded.borrow().contains(&key));
+            let expanded = expanded.clone();
+            widgets.row.connect_expanded_notify(move |row| {
+                let mut set = expanded.borrow_mut();
+                if row.is_expanded() {
+                    set.insert(key.clone());
+                } else {
+                    set.remove(&key);
+                }
+            });
+            self.list.append(&widgets.row);
+            rows.push(widgets);
+        }
+        self.rows.replace(rows);
+        self.shape.replace(shape);
+    }
+}
+
+fn session_subtitle(session: &SessionRow, now_ms: i64) -> String {
     let mut subtitle = vec![session.tool.label().to_owned()];
     if let Some(project) = &session.project {
         subtitle.push(toktop::aggregate::project_label(project));
     }
     subtitle.push(format::ago(session.last_activity, now_ms));
+    subtitle.join(" · ")
+}
+
+fn session_row(session: &SessionRow, now_ms: i64, prices_available: bool) -> SessionRowWidgets {
     let row = adw::ActionRow::builder()
         .title(&session.title)
         .use_markup(false)
         .title_lines(1)
-        .subtitle(subtitle.join(" · "))
+        .subtitle(session_subtitle(session, now_ms))
         .subtitle_lines(1)
         .build();
     if let Some(project) = &session.project {
@@ -485,7 +578,40 @@ fn session_row(session: &SessionRow, now_ms: i64, prices_available: bool) -> adw
     numbers.append(&tokens);
     numbers.append(&cost);
     row.add_suffix(&numbers);
-    row
+    SessionRowWidgets { row, tokens, cost }
+}
+
+impl SessionList {
+    fn set(&self, sessions: &[SessionRow], now_ms: i64, prices_available: bool) {
+        let sessions = &sessions[..sessions.len().min(MAX_SESSIONS)];
+        let shape: Vec<_> = sessions
+            .iter()
+            .map(|session| (session.tool, session.title.clone(), session.project.clone()))
+            .collect();
+        if *self.shape.borrow() == shape {
+            for (session, widgets) in sessions.iter().zip(self.rows.borrow().iter()) {
+                widgets.row.set_subtitle(&session_subtitle(session, now_ms));
+                widgets
+                    .tokens
+                    .set_label(&format::tokens(session.usage.tokens.total()));
+                widgets
+                    .cost
+                    .set_label(&display_cost(session.usage.cost, prices_available));
+            }
+            return;
+        }
+        self.list.remove_all();
+        let rows: Vec<_> = sessions
+            .iter()
+            .map(|session| {
+                let widgets = session_row(session, now_ms, prices_available);
+                self.list.append(&widgets.row);
+                widgets
+            })
+            .collect();
+        self.rows.replace(rows);
+        self.shape.replace(shape);
+    }
 }
 
 fn window_name(minutes: u64) -> String {
