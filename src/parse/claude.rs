@@ -189,7 +189,10 @@ impl State {
         }
 
         // Locally generated placeholders (errors, interruptions) carry no real usage.
-        if model.trim().is_empty() || model == "<synthetic>" || event.tokens.is_empty() {
+        if model.trim().is_empty()
+            || model == "<synthetic>"
+            || (event.tokens.is_empty() && (event.key.is_none() || event.cache_write_1h_raw == 0))
+        {
             return;
         }
         event.model = session.model_index(model);

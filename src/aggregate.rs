@@ -194,6 +194,10 @@ pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64
                 },
                 None => event.tokens,
             };
+            // Raw-only Claude snapshots remain pending until duplicates merge.
+            if tokens.is_empty() {
+                continue;
+            }
 
             let model = session
                 .models

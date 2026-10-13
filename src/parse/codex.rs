@@ -314,6 +314,7 @@ impl State {
                     Some(delta) => delta,
                     None => {
                         self.last_total = Some(total);
+                        self.inherited_totals.clear();
                         return;
                     }
                 }

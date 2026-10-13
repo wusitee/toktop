@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+pub(crate) mod aliases;
+
 pub const SOURCE_URL: &str =
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
@@ -142,22 +144,30 @@ impl PriceTable {
     /// variant suffixes (`-thinking`, `-high`, `-n`) to the catalog name, so
     /// trailing `-segments` are dropped until a match is found.
     pub fn lookup(&self, model: &str) -> Option<&Price> {
-        let mut name = model.trim().to_ascii_lowercase();
+        let mut name = aliases::canonical_id(model);
         // A provider-qualified id names its own price.
         if let Some(price) = self.prices.get(&name) {
             return Some(price);
         }
         if let Some(stripped) = name.rsplit('/').next() {
-            name = stripped.to_owned();
+            name = aliases::canonical_id(stripped);
         }
         loop {
-            if let Some(price) = self.exact(&name) {
+            let canonical = aliases::resolve_alias(&name).unwrap_or(&name);
+            if let Some(price) = self.exact(canonical) {
                 return Some(price);
+            }
+            // LiteLLM publishes Gemini Pro's catalog entry with `-preview`.
+            if matches!(canonical, "gemini-3-pro" | "gemini-3.1-pro") {
+                if let Some(price) = self.exact(&format!("{canonical}-preview")) {
+                    return Some(price);
+                }
             }
             let cut = name.rfind('-')?;
             name.truncate(cut);
+            let canonical = aliases::resolve_alias(&name).unwrap_or(&name);
             // Stop before reducing an id to its bare family name ("gpt", "claude-opus").
-            if !name.contains('-') || !name.bytes().any(|b| b.is_ascii_digit()) {
+            if !canonical.contains('-') || !canonical.bytes().any(|b| b.is_ascii_digit()) {
                 return None;
             }
         }

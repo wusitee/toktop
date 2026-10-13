@@ -12,6 +12,9 @@ const LITELLM: &str = r#"{
     "claude-opus-5-5": {"mode": "chat", "input_cost_per_token": 4e-06, "output_cost_per_token": 2e-05,
         "cache_read_input_token_cost": 2e-07, "cache_creation_input_token_cost": 5e-06,
         "cache_creation_input_token_cost_above_1hr": 8e-06},
+    "claude-sonnet-4-6": {"input_cost_per_token": 3e-06, "output_cost_per_token": 1.5e-05},
+    "gemini-3.1-pro-preview": {"input_cost_per_token": 2e-06, "output_cost_per_token": 1.2e-05},
+    "gpt-5.6-sol": {"input_cost_per_token": 5e-06, "output_cost_per_token": 3e-05},
     "azure/gpt-6.1-sol": {"mode": "chat", "input_cost_per_token": 9e-06, "output_cost_per_token": 9e-05},
     "openai/gpt-6.1-sol": {"mode": "chat", "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05,
         "input_cost_per_token_above_272k_tokens": 4e-06, "output_cost_per_token_above_272k_tokens": 2e-05},
@@ -33,6 +36,18 @@ fn litellm_table_resolves_tool_model_ids() {
     );
     assert!(table.lookup("claude-opus").is_none());
     assert!(table.lookup("codex-auto-review").is_none());
+    assert!(table.lookup("gemini-3-flash").is_none());
+    for (alias, target) in [
+        ("MODEL_PLACEHOLDER_M35", "claude-sonnet-4-6"),
+        ("claude-sonnet-4.6", "claude-sonnet-4-6"),
+        ("anthropic/claude-sonnet-4.6-thinking", "claude-sonnet-4-6"),
+        ("MODEL_PLACEHOLDER_M35-thinking", "claude-sonnet-4-6"),
+        ("gemini-pro-default", "gemini-3.1-pro-preview"),
+        ("MODEL_PLACEHOLDER_M37", "gemini-3.1-pro-preview"),
+        ("openai/gpt-daybreak-blue-latest", "gpt-5.6-sol"),
+    ] {
+        assert_eq!(table.lookup(alias), table.lookup(target), "{alias}");
+    }
 }
 
 #[test]
@@ -179,7 +194,7 @@ fn claude_cross_file_merge_preserves_input_and_raw_cache_splits() {
         concat!(
             r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"input","model":"claude-opus-5-5","usage":{"input_tokens":42494}}}"#,
             "\n",
-            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"cache","model":"claude-opus-5-5","usage":{"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"cache","model":"claude-opus-5-5","usage":{"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
             "\n",
         ),
         concat!(

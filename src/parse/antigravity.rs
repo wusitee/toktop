@@ -15,7 +15,7 @@
 use super::{file_stem, proto};
 use crate::model::{Event, Session, Tokens};
 use rusqlite::{Connection, OpenFlags};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::Path;
 use std::time::{Duration, UNIX_EPOCH};
@@ -89,10 +89,12 @@ pub fn parse(path: &Path) -> io::Result<Session> {
         .query_map([], |row| {
             Ok((row.get::<_, i64>(0)?, row.get::<_, Vec<u8>>(1)?))
         })
+        .map_err(to_io)?
+        .collect::<rusqlite::Result<Vec<_>>>()
         .map_err(to_io)?;
-    let mut seen = std::collections::HashSet::new();
-    for blob in rows {
-        let (gen_index, blob) = blob.map_err(to_io)?;
+    let models = SessionModels::from_blobs(rows.iter().map(|(_, blob)| blob.as_slice()));
+    let mut seen = HashSet::new();
+    for (gen_index, blob) in rows {
         let Some(chat) = proto::bytes(&blob, 1) else {
             continue;
         };
@@ -131,8 +133,10 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             })
             .or_else(|| step_times.by_generation.get(&gen_index).copied())
             .unwrap_or(fallback_ms);
-        let model = proto::string(chat, 19).unwrap_or("unknown").to_owned();
-        let model = session.model_index(&model);
+        let model = non_empty_string(chat, 19)
+            .or_else(|| models.recover(chat))
+            .unwrap_or("unknown");
+        let model = session.model_index(model);
         session.events.push(Event {
             ts,
             model,
@@ -143,6 +147,74 @@ pub fn parse(path: &Path) -> io::Result<Session> {
         });
     }
     Ok(session)
+}
+
+/// Display labels only join rows to machine ids observed in this conversation.
+#[derive(Default)]
+struct SessionModels {
+    by_display: HashMap<String, String>,
+    sole_model: Option<String>,
+}
+
+impl SessionModels {
+    fn from_blobs<'a>(blobs: impl IntoIterator<Item = &'a [u8]>) -> Self {
+        let mut by_display: HashMap<&str, Option<&str>> = HashMap::new();
+        let mut distinct = HashSet::new();
+        let mut labels = HashSet::new();
+        for blob in blobs {
+            let Some(chat) = proto::bytes(blob, 1) else {
+                continue;
+            };
+            let label = non_empty_string(chat, 21);
+            labels.extend(label);
+            let Some(model) = non_empty_string(chat, 19) else {
+                continue;
+            };
+            distinct.insert(model);
+            if let Some(label) = label {
+                by_display
+                    .entry(label)
+                    .and_modify(|resolved| {
+                        if let Some(existing) = *resolved {
+                            if crate::pricing::aliases::canonical_id(existing)
+                                != crate::pricing::aliases::canonical_id(model)
+                            {
+                                *resolved = None;
+                            }
+                        }
+                    })
+                    .or_insert(Some(model));
+            }
+        }
+        let by_display: HashMap<String, String> = by_display
+            .into_iter()
+            .filter_map(|(label, model)| Some((label.to_owned(), model?.to_owned())))
+            .collect();
+        // An unidentified label is evidence of a model the file never names.
+        let every_label_identified = labels.iter().all(|label| by_display.contains_key(*label));
+        let sole_model = if distinct.len() == 1 && every_label_identified {
+            distinct.into_iter().next().map(str::to_owned)
+        } else {
+            None
+        };
+        Self {
+            by_display,
+            sole_model,
+        }
+    }
+
+    fn recover(&self, chat: &[u8]) -> Option<&str> {
+        match non_empty_string(chat, 21) {
+            Some(label) => self.by_display.get(label).map(String::as_str),
+            None => self.sole_model.as_deref(),
+        }
+    }
+}
+
+fn non_empty_string(blob: &[u8], number: u64) -> Option<&str> {
+    proto::string(blob, number)
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
 }
 
 /// Root `#2` of a generation: a varint, or a packed list whose first entry is

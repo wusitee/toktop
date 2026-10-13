@@ -21,15 +21,16 @@ fn append(path: &Path, text: &str) {
 const CLAUDE: &str = concat!(
     r#"{"type":"user","sessionId":"s1","cwd":"/work/app","timestamp":"2026-10-01T10:00:00Z"}"#,
     "\n",
-    // Streaming writes one response several times. The first copy is a bare
-    // prompt snapshot (whole prompt as input, no cache fields); the second
-    // reports the cache split and a 1-hour split larger than its partial total.
+    // The raw 1-hour split arrives before any countable tokens.
+    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
+    "\n",
+    // A bare prompt snapshot reports the whole prompt without cache fields.
     r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":150,"output_tokens":1}}}"#,
     "\n",
     // Cache fields without input must leave the bare input replaceable.
     r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"cache_read_input_tokens":100}}}"#,
     "\n",
-    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20,"cache_creation":{"ephemeral_1h_input_tokens":30}}}}"#,
+    r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:01Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":5,"cache_read_input_tokens":100,"cache_creation_input_tokens":20}}}"#,
     "\n",
     // Final copy: full output, an advisor call listed in `iterations`.
     r#"{"type":"assistant","sessionId":"s1","requestId":"r1","timestamp":"2026-10-01T10:00:02Z","message":{"id":"m1","model":"claude-opus-5-5","usage":{"input_tokens":10,"output_tokens":50,"cache_read_input_tokens":100,"cache_creation_input_tokens":40,"iterations":[{"type":"message","input_tokens":10,"output_tokens":50},{"type":"advisor_message","model":"claude-fable-5-1","input_tokens":700,"output_tokens":7}]}}}"#,
@@ -91,6 +92,41 @@ fn appended_lines_extend_the_session_and_partial_lines_wait() {
     // A rewritten (shorter) file cannot be resumed.
     write(&path, first);
     assert!(!parse::parse_appended(&path, &mut session, &mut cursor).unwrap());
+}
+
+#[test]
+fn claude_pending_cache_split_is_hidden_until_usage_arrives() {
+    use toktop::aggregate::{self, Period};
+    use toktop::pricing::PriceTable;
+    use toktop::store::Store;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("pending.jsonl");
+    let split = concat!(
+        r#"{"type":"assistant","timestamp":"2026-10-01T10:00:01Z","message":{"id":"cache","model":"claude-sonnet-4-6","usage":{"cache_creation":{"ephemeral_1h_input_tokens":100000}}}}"#,
+        "\n",
+    );
+    write(&path, split);
+    let (mut session, cursor) = parse::parse_full(Tool::ClaudeCode, &path).unwrap();
+    let mut cursor = cursor.unwrap();
+    let mut store = Store::default();
+    store.insert_session(path.clone(), Tool::ClaudeCode, session.clone());
+    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::AllTime, 0);
+    assert_eq!(summary.total.requests, 0);
+    assert!(summary.total.tokens.is_empty());
+    assert!(summary.sessions.is_empty());
+    assert!(summary.by_model.is_empty());
+    assert!(summary.daily.is_empty());
+
+    append(
+        &path,
+        concat!(
+            r#"{"type":"assistant","timestamp":"2026-10-01T10:00:02Z","message":{"id":"cache","model":"claude-sonnet-4-6","usage":{"cache_creation_input_tokens":100000}}}"#,
+            "\n",
+        ),
+    );
+    assert!(parse::parse_appended(&path, &mut session, &mut cursor).unwrap());
+    assert_eq!(session.events[0].tokens.cache_write_1h, 100000);
 }
 
 fn codex_count(
@@ -216,6 +252,7 @@ fn generation(
     usage: &[(u64, u64)],
     response_id: &str,
     model: &str,
+    label: Option<&str>,
     legacy_seconds: Option<u64>,
 ) -> Vec<u8> {
     let mut usage_msg = Vec::new();
@@ -225,7 +262,12 @@ fn generation(
     field_bytes(&mut usage_msg, 11, response_id.as_bytes());
     let mut chat = Vec::new();
     field_bytes(&mut chat, 4, &usage_msg);
-    field_bytes(&mut chat, 19, model.as_bytes());
+    if !model.is_empty() {
+        field_bytes(&mut chat, 19, model.as_bytes());
+    }
+    if let Some(label) = label {
+        field_bytes(&mut chat, 21, label.as_bytes());
+    }
     if let Some(seconds) = legacy_seconds {
         let mut generation = Vec::new();
         field_bytes(&mut generation, 4, &timestamp(seconds));
@@ -270,6 +312,7 @@ fn antigravity_reads_generation_metadata() {
         &[(1, 1000), (2, 500), (5, 200), (9, 30), (10, 70)],
         "resp-1",
         "gemini-3.8-flash-n",
+        None,
         None,
     );
     // The same response recorded twice must count once.
@@ -425,6 +468,7 @@ fn codex_fork_skips_known_inherited_snapshots_after_own_context() {
         100
     );
 
+    let before_reset = text.clone();
     // A genuine reset to the request's own size can equal an inherited total.
     text += &codex_count("2026-10-01T11:00:05Z", 9500, 9400, 0, 100, 0);
     write(&path, &text);
@@ -449,6 +493,114 @@ fn codex_fork_skips_known_inherited_snapshots_after_own_context() {
             .sum::<u64>(),
         10100
     );
+
+    // A total-only component regression also retires inherited counters.
+    // Replace the request-based reset so this branch has to clear the set.
+    let mut text = before_reset.replace(
+        r#""total_token_usage":{"total_tokens":10100}"#,
+        r#""total_token_usage":{"input_tokens":10000,"total_tokens":10100}"#,
+    );
+    text += concat!(
+        r#"{"timestamp":"2026-10-01T11:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"total_tokens":50}}}}"#,
+        "\n",
+    );
+    text += &codex_count("2026-10-01T11:00:06Z", 9500, 90, 0, 10, 0);
+    write(&path, &text);
+    let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|event| event.tokens.total())
+            .sum::<u64>(),
+        200
+    );
+}
+
+#[test]
+fn antigravity_recovers_models_without_guessing_from_labels() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("models.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob)")
+        .unwrap();
+    let cases = [
+        // Recovery must see later rows, and return the observed machine id.
+        (
+            &[
+                ("", Some("Claude Sonnet 4.6 (Thinking)")),
+                (
+                    "MODEL_PLACEHOLDER_M35",
+                    Some("Claude Sonnet 4.6 (Thinking)"),
+                ),
+            ][..],
+            "MODEL_PLACEHOLDER_M35",
+        ),
+        // Different spellings of the same priced model are not ambiguous.
+        (
+            &[
+                ("", Some("Pro")),
+                ("gemini-pro-default", Some("Pro")),
+                ("gemini-pro-agent", Some("Pro")),
+            ][..],
+            "gemini-pro-default",
+        ),
+        (
+            &[
+                ("", Some("Shared")),
+                ("MODEL_PLACEHOLDER_M35", Some("Shared")),
+                ("MODEL_PLACEHOLDER_M26", Some("Shared")),
+            ][..],
+            "unknown",
+        ),
+        // Unlabelled rows inherit the single id only if all labels resolve.
+        (
+            &[
+                ("", None),
+                ("MODEL_PLACEHOLDER_M35", Some("Sonnet")),
+                ("", Some("Sonnet")),
+            ][..],
+            "MODEL_PLACEHOLDER_M35",
+        ),
+        (
+            &[
+                ("", None),
+                ("MODEL_PLACEHOLDER_M35", Some("Sonnet")),
+                ("", Some("Other")),
+            ][..],
+            "unknown",
+        ),
+        (
+            &[
+                ("", Some("Other")),
+                ("MODEL_PLACEHOLDER_M35", Some("Sonnet")),
+            ][..],
+            "unknown",
+        ),
+    ];
+    for (rows, expected) in cases {
+        conn.execute("DELETE FROM gen_metadata", []).unwrap();
+        for (index, (model, label)) in rows.iter().enumerate() {
+            let blob = generation(
+                None,
+                &[(1, 100)],
+                &format!("response-{index}"),
+                model,
+                *label,
+                None,
+            );
+            conn.execute(
+                "INSERT INTO gen_metadata VALUES (?1, ?2)",
+                rusqlite::params![index as i64, blob],
+            )
+            .unwrap();
+        }
+        let (session, _) = parse::parse_full(Tool::Antigravity, &path).unwrap();
+        assert_eq!(
+            session.models[session.events[0].model as usize], expected,
+            "{rows:?}"
+        );
+    }
 }
 
 #[test]
@@ -491,7 +643,14 @@ fn antigravity_prefers_legacy_timestamp_then_joins_steps_by_response_or_generati
         (1, None, "response", None),
         (2, None, "generation", None),
     ] {
-        let blob = generation(step, &[(1, 1)], response, "gemini-3.8-flash-n", legacy);
+        let blob = generation(
+            step,
+            &[(1, 1)],
+            response,
+            "gemini-3.8-flash-n",
+            None,
+            legacy,
+        );
         conn.execute(
             "INSERT INTO gen_metadata VALUES (?1, ?2)",
             rusqlite::params![index, blob],
