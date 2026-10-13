@@ -207,7 +207,6 @@ impl Store {
                 titles_dirty |= is_title_source(&path);
                 continue;
             };
-            titles_dirty = true;
             if !path.exists() {
                 changed |= self.files.remove(&path).is_some();
                 continue;
@@ -216,18 +215,18 @@ impl Store {
                 continue;
             }
             changed = true;
-            if let Some(entry) = self.files.get_mut(&path) {
-                if let Some(cursor) = entry.cursor.as_mut() {
-                    let stamp = Stamp::read(&path);
-                    let same_file = stamp.zip(entry.stamp).is_some_and(|(now, before)| {
-                        now.inode == before.inode && now.size >= before.size
-                    });
-                    if same_file {
-                        if let Ok(true) = parse::parse_appended(&path, &mut entry.session, cursor) {
-                            entry.stamp = stamp;
-                            continue;
-                        }
-                    }
+            if let Some(entry) = self.files.get_mut(&path)
+                && let Some(cursor) = entry.cursor.as_mut()
+            {
+                let stamp = Stamp::read(&path);
+                let same_file = stamp.zip(entry.stamp).is_some_and(|(now, before)| {
+                    now.inode == before.inode && now.size >= before.size
+                });
+                if same_file
+                    && let Ok(true) = parse::parse_appended(&path, &mut entry.session, cursor)
+                {
+                    entry.stamp = stamp;
+                    continue;
                 }
             }
             match read_file(tool, &path) {
@@ -256,10 +255,7 @@ impl Store {
 }
 
 fn is_title_source(path: &Path) -> bool {
-    path == paths::codex_session_index()
-        || path
-            .file_name()
-            .is_some_and(|name| name == "conversation_summaries.db")
+    paths::title_sources().iter().any(|source| source == path)
 }
 
 fn read_file(tool: Tool, path: &Path) -> io::Result<FileEntry> {

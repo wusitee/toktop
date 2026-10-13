@@ -200,10 +200,10 @@ impl PriceTable {
                 return Some(price);
             }
             // LiteLLM publishes Gemini Pro's catalog entry with `-preview`.
-            if matches!(canonical, "gemini-3-pro" | "gemini-3.1-pro") {
-                if let Some(price) = self.exact(&format!("{canonical}-preview")) {
-                    return Some(price);
-                }
+            if matches!(canonical, "gemini-3-pro" | "gemini-3.1-pro")
+                && let Some(price) = self.exact(&format!("{canonical}-preview"))
+            {
+                return Some(price);
             }
             let cut = name.rfind('-')?;
             name.truncate(cut);

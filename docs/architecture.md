@@ -2,6 +2,16 @@
 
 toktop reads the local logs of AI coding tools, turns them into usage events and aggregates them for display. It is a single process with no subprocesses. The only network access is the daily price download.
 
+## Threads
+
+| Thread | Role |
+|---|---|
+| GTK main | Renders `Summary` values. Never reads files. |
+| `toktop-worker` | Owns the `Store`. Applies file changes, recomputes the summary and sends it to the UI when it differs from the last one. |
+| `toktop-watch` | Blocks on inotify and forwards changed paths to the worker. |
+
+The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify the worker falls back to a full rescan every 10 s.
+
 ## Data flow
 
 1. **Discover.** `Store` walks each tool's source roots ([sources.md](sources.md)).
@@ -18,6 +28,9 @@ toktop reads the local logs of AI coding tools, turns them into usage events and
 | `src/pricing.rs`, `src/pricing/aliases.rs` | LiteLLM price table, reduced and cached; tool model aliases; cost per request. |
 | `src/model.rs` | Shared types: `Tool`, `Tokens`, `Event`, `Session`, rate limits. |
 | `src/paths.rs` | Source and cache locations, with the tools' environment overrides. |
+| `src/watch.rs` | Recursive inotify watcher. |
+| `src/worker.rs` | Worker thread loop. |
+| `src/ui/` | GTK 4 / libadwaita window and the daily chart. |
 
 ## Incremental reads
 
@@ -26,6 +39,14 @@ JSONL files are append-only. Each keeps a `Cursor` (byte offset, inode and parse
 Antigravity databases are re-read whole on change; they are small. A file counts as changed when its inode, size or mtime differs, or those of its SQLite `-wal` sidecar, since commits land there first. A locked or unreadable database keeps its previous snapshot.
 
 The first scan parses all files in parallel on up to 8 threads.
+
+## Watching
+
+The watcher subscribes to content and directory events only (modify, create, delete, move), not opens or reads, so it is idle while no tool writes. Roots that do not exist yet are picked up when created: their nearest existing ancestor is watched for new directories. Title indexes outside the roots are watched through their parent directory. A queue overflow or a removed watched directory triggers a full resync.
+
+## Memory
+
+glibc is limited to one malloc arena (`M_ARENA_MAX=1`) at startup, and the heap is trimmed after full scans. Without this the parallel initial scan leaves about 20 MB stranded in per-thread arenas. The retained data for ~11K events is about 4 MB; most of the remaining footprint is GTK's own baseline.
 
 ## Periods
 

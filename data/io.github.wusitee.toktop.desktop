@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=toktop
+Comment=Token usage of AI coding tools
+Exec=toktop
+Icon=utilities-system-monitor
+Terminal=false
+Categories=Development;Monitor;
+Keywords=tokens;claude;codex;antigravity;usage;
+StartupNotify=true

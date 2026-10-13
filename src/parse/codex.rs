@@ -235,10 +235,9 @@ impl State {
 
         if !matches!(line.kind.as_deref(), Some("turn_context" | "session_meta"))
             && self.replaying_before.is_none()
+            && let Some(tier) = payload.request_tier()
         {
-            if let Some(tier) = payload.request_tier() {
-                self.request_tier = Some(tier);
-            }
+            self.request_tier = Some(tier);
         }
 
         match line.kind.as_deref() {
@@ -260,15 +259,14 @@ impl State {
                 session.project = payload.cwd;
             }
             Some("turn_context") => {
-                if let (Some(own), Some(turn)) = (&self.replaying_before, &payload.turn_id) {
-                    if uuid_ms(own)
+                if let (Some(own), Some(turn)) = (&self.replaying_before, &payload.turn_id)
+                    && (uuid_ms(own)
                         .zip(uuid_ms(turn))
                         .is_some_and(|(own, turn)| turn >= own)
-                        || self.task_started_turn_ids.contains(turn)
-                    {
-                        self.replaying_before = None;
-                        self.task_started_turn_ids.clear();
-                    }
+                        || self.task_started_turn_ids.contains(turn))
+                {
+                    self.replaying_before = None;
+                    self.task_started_turn_ids.clear();
                 }
                 if self.replaying_before.is_none() {
                     self.request_tier = payload.request_tier();

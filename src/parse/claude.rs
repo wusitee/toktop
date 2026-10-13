@@ -110,10 +110,10 @@ impl State {
             return;
         };
 
-        if session.id.is_empty() {
-            if let Some(id) = line.session_id.as_deref() {
-                session.id = id.to_owned();
-            }
+        if session.id.is_empty()
+            && let Some(id) = line.session_id.as_deref()
+        {
+            session.id = id.to_owned();
         }
         if session.project.is_none() {
             session.project = line.cwd.clone();
