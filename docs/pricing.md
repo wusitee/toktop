@@ -17,7 +17,7 @@ Models without a price count as zero cost and are listed as unpriced.
 
 ## Cost
 
-Each request is priced on its own. Output and reasoning use the output rate; cache reads, 5-minute and 1-hour cache writes use their own rates, falling back to the input rate. Long-context tiers (above 200K or 272K prompt tokens) apply per request, including tiered cache-write rates; a rate the tier omits falls back to the base rate.
+Each request is priced on its own. Output and reasoning use the output rate. Cache reads and 5-minute cache writes use their own rates, falling back to the input rate; 1-hour cache writes fall back to the 5-minute rate, then the input rate. Long-context tiers (above 200K or 272K prompt tokens) apply per request, including tiered cache-write rates; a rate the tier omits falls back to the base rate.
 
 ## Service tiers
 

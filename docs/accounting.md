@@ -20,7 +20,7 @@ Source: `token_count` events in rollout files. Cached and cache-write tokens are
 
 - Each request's `last_token_usage` is counted once, when `total_token_usage` changes.
 - A total that drops by less than about one request is a late duplicate and is skipped. A larger drop, or a restart at the request's own size, is a compaction reset and is counted.
-- Rows without `last_token_usage` fall back to the difference of totals. A last-only row advances the baseline by its usage, so a later cumulative snapshot does not count it again.
+- Rows without `last_token_usage` fall back to the difference of totals. A last-only row advances an existing baseline by its usage, so a later cumulative snapshot does not count it again; it does not create a baseline on its own.
 - Events are keyed by session id, timestamp and total, so a rollout in both `sessions/` and `archived_sessions/` counts once.
 
 ### Service tiers

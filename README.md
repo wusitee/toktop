@@ -6,9 +6,14 @@ Supported tools: Claude Code, Codex and Antigravity.
 
 ## Build
 
-Requires Rust 1.85+ and SQLite.
+Requires Rust 1.85+, a C toolchain, `pkg-config`, and SQLite and OpenSSL development files.
 
 ```sh
+# Arch Linux
+sudo pacman -S --needed rust base-devel pkgconf sqlite openssl
+# Debian / Ubuntu
+sudo apt install cargo build-essential pkg-config libsqlite3-dev libssl-dev
+
 cargo build --release
 ```
 
