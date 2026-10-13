@@ -21,6 +21,28 @@ pub fn tokens(value: u64) -> String {
     value.to_string()
 }
 
+/// `1435810966` -> `1,435,810,966`.
+pub fn grouped(value: u64) -> String {
+    let digits = value.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(digit);
+    }
+    out
+}
+
+/// Output speed, as `84 tok/s` or `8.2 tok/s`.
+pub fn speed(tokens_per_second: f64) -> String {
+    if tokens_per_second >= 10.0 {
+        format!("{tokens_per_second:.0} tok/s")
+    } else {
+        format!("{tokens_per_second:.1} tok/s")
+    }
+}
+
 pub fn cost(usd: f64) -> String {
     if usd >= 1000.0 {
         format!("${usd:.0}")

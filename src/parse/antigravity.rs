@@ -148,6 +148,7 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             key,
             input_is_split: false,
             cache_write_1h_raw: 0,
+            duration_ms: 0,
         });
     }
     Ok(session)

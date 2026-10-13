@@ -10,15 +10,22 @@
 //!
 //! Top-level usage covers the main model only. Advisor calls listed in
 //! `usage.iterations` are separate events under their own model.
+//!
+//! A response's duration runs from the latest `user` or `attachment` line
+//! before it (the prompt or tool result that triggered the request) to the
+//! last line written for it.
 
-use super::{clamp, contains, parse_ts};
+use super::{clamp, contains, parse_ts, prompt_title};
 use crate::model::{Event, ServiceTier, Session, Tokens};
 use serde::Deserialize;
 use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub struct State {
-    seen: HashMap<Box<str>, usize>,
+    /// Event index and request start of each keyed response.
+    seen: HashMap<Box<str>, (usize, Option<i64>)>,
+    /// Timestamp of the latest prompt or tool result line.
+    last_input: Option<i64>,
     /// Whether the title came from a user rename, which outranks AI titles.
     custom_title: bool,
 }
@@ -91,6 +98,38 @@ impl Usage {
 }
 
 #[derive(Deserialize)]
+struct UserLine {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    #[serde(rename = "isMeta", default)]
+    is_meta: bool,
+    message: Option<UserMessage>,
+}
+
+#[derive(Deserialize)]
+struct UserMessage {
+    content: Option<serde_json::Value>,
+}
+
+/// Text the user typed, from a `user` line; tool results and injected
+/// context yield `None`.
+fn user_prompt(raw: &[u8]) -> Option<String> {
+    let line: UserLine = serde_json::from_slice(raw).ok()?;
+    if line.kind.as_deref() != Some("user") || line.is_meta {
+        return None;
+    }
+    match line.message?.content? {
+        serde_json::Value::String(text) => prompt_title(&text),
+        serde_json::Value::Array(blocks) => blocks.iter().find_map(|block| {
+            (block.get("type")?.as_str()? == "text")
+                .then(|| prompt_title(block.get("text")?.as_str()?))
+                .flatten()
+        }),
+        _ => None,
+    }
+}
+
+#[derive(Deserialize)]
 struct CacheCreation {
     ephemeral_1h_input_tokens: Option<i64>,
 }
@@ -98,6 +137,18 @@ struct CacheCreation {
 impl State {
     pub fn line(&mut self, session: &mut Session, raw: &[u8]) {
         let has_usage = contains(raw, b"\"usage\"");
+        if !has_usage {
+            let user = contains(raw, b"\"type\":\"user\"");
+            if user || contains(raw, b"\"type\":\"attachment\"") {
+                // The first timestamp key is the line's own; nested objects come later.
+                if let Some(ts) = first_timestamp(raw) {
+                    self.last_input = Some(ts);
+                }
+            }
+            if user && session.prompt.is_none() {
+                session.prompt = user_prompt(raw);
+            }
+        }
         let wants_project = session.project.is_none() && contains(raw, b"\"cwd\"");
         if !has_usage
             && !wants_project
@@ -189,9 +240,12 @@ impl State {
             key: key.map(Into::into),
             input_is_split: usage.input_tokens.is_some() && usage.reports_split(),
             cache_write_1h_raw: usage.cache_write_1h(),
+            duration_ms: 0,
         };
-        if let Some(&index) = event.key.as_deref().and_then(|key| self.seen.get(key)) {
-            session.events[index].max_merge(&event);
+        if let Some(&(index, start)) = event.key.as_deref().and_then(|key| self.seen.get(key)) {
+            let known = &mut session.events[index];
+            known.max_merge(&event);
+            known.duration_ms = known.duration_ms.max(duration(start, ts));
             return;
         }
 
@@ -203,11 +257,30 @@ impl State {
             return;
         }
         event.model = session.model_index(model);
+        // A copy written before any prompt (a resumed session) has no start.
+        let start = self.last_input.filter(|start| *start <= ts);
+        event.duration_ms = duration(start, ts);
         if let Some(key) = &event.key {
-            self.seen.insert(key.clone(), session.events.len());
+            self.seen.insert(key.clone(), (session.events.len(), start));
         }
         session.events.push(event);
     }
+}
+
+/// Milliseconds from `start` to `end`, or 0 when unknown or implausible.
+fn duration(start: Option<i64>, end: i64) -> u32 {
+    start
+        .map(|start| end - start)
+        .filter(|ms| *ms > 0 && *ms <= super::MAX_RESPONSE_MS)
+        .map_or(0, |ms| ms as u32)
+}
+
+/// Value of the first `"timestamp"` key in a raw line.
+fn first_timestamp(raw: &[u8]) -> Option<i64> {
+    const KEY: &[u8] = b"\"timestamp\":\"";
+    let start = memchr::memmem::find(raw, KEY)? + KEY.len();
+    let len = memchr::memchr(b'"', &raw[start..])?;
+    parse_ts(std::str::from_utf8(&raw[start..start + len]).ok()?)
 }
 
 fn non_empty(value: Option<String>) -> Option<String> {

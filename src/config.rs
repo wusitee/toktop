@@ -22,15 +22,79 @@ pub struct Config {
     /// Tools whose logs are read.
     #[serde(with = "tool_keys")]
     pub tools: Vec<Tool>,
-    pub window: Window,
+    pub widget: Widget,
+    /// The `[window]` table of earlier versions, accepted and dropped.
+    #[serde(rename = "window", skip_serializing)]
+    pub legacy_window: Option<serde::de::IgnoredAny>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+/// Placement and contents of the widget.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Window {
+pub struct Widget {
+    pub layer: Layer,
+    pub anchor: Anchor,
+    /// Distance from the anchored screen edges, in pixels.
+    pub margin: i32,
+    /// Monitor connector name, such as `DP-1`. Empty lets the compositor choose.
+    pub output: String,
     pub width: i32,
-    pub height: i32,
-    pub maximized: bool,
+    /// Rows in the models, projects and tools list.
+    pub rows: usize,
+    /// Recent sessions shown.
+    pub sessions: usize,
+}
+
+/// Where the widget lives. The first four are layer-shell layers, from the
+/// wallpaper up; `Window` is an ordinary window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Layer {
+    Background,
+    Bottom,
+    Top,
+    Overlay,
+    Window,
+}
+
+impl Layer {
+    /// Whether the widget is part of the desktop and shown from startup,
+    /// rather than a surface the user summons.
+    pub fn is_desktop(self) -> bool {
+        matches!(self, Layer::Background | Layer::Bottom)
+    }
+}
+
+/// Screen position of a layer-shell widget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Anchor {
+    TopLeft,
+    Top,
+    TopRight,
+    Left,
+    Center,
+    Right,
+    BottomLeft,
+    Bottom,
+    BottomRight,
+}
+
+impl Anchor {
+    /// Anchored edges as (top, bottom, left, right).
+    pub fn edges(self) -> (bool, bool, bool, bool) {
+        match self {
+            Anchor::TopLeft => (true, false, true, false),
+            Anchor::Top => (true, false, false, false),
+            Anchor::TopRight => (true, false, false, true),
+            Anchor::Left => (false, false, true, false),
+            Anchor::Center => (false, false, false, false),
+            Anchor::Right => (false, false, false, true),
+            Anchor::BottomLeft => (false, true, true, false),
+            Anchor::Bottom => (false, true, false, false),
+            Anchor::BottomRight => (false, true, false, true),
+        }
+    }
 }
 
 impl Default for Config {
@@ -39,17 +103,22 @@ impl Default for Config {
             period: Period::Today,
             tray: true,
             tools: Tool::ALL.to_vec(),
-            window: Window::default(),
+            widget: Widget::default(),
+            legacy_window: None,
         }
     }
 }
 
-impl Default for Window {
+impl Default for Widget {
     fn default() -> Self {
-        Window {
-            width: 420,
-            height: 680,
-            maximized: false,
+        Widget {
+            layer: Layer::Bottom,
+            anchor: Anchor::TopRight,
+            margin: 16,
+            output: String::new(),
+            width: 380,
+            rows: 5,
+            sessions: 5,
         }
     }
 }
@@ -65,6 +134,11 @@ impl fmt::Display for Error {
 
 pub fn path() -> PathBuf {
     paths::config_home().join("toktop").join("config.toml")
+}
+
+/// Optional user stylesheet, loaded over the built-in style.
+pub fn style_path() -> PathBuf {
+    paths::config_home().join("toktop").join("style.css")
 }
 
 impl Config {

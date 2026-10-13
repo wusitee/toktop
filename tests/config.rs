@@ -1,7 +1,7 @@
 //! Settings file contracts.
 
 use toktop::aggregate::Period;
-use toktop::config::{Config, Window};
+use toktop::config::{Anchor, Config, Layer, Widget};
 use toktop::model::Tool;
 
 #[test]
@@ -10,10 +10,14 @@ fn missing_and_partial_files_use_defaults() {
     let path = dir.path().join("toktop/config.toml");
     assert_eq!(Config::load(&path).unwrap(), Config::default());
 
-    let partial = Config::parse("period = \"7d\"\n[window]\nwidth = 600\n").unwrap();
+    // The `[window]` table of earlier versions is accepted and ignored.
+    let partial = Config::parse(
+        "period = \"7d\"\n[window]\nwidth = 600\n[widget]\nanchor = \"bottom-left\"\n",
+    )
+    .unwrap();
     assert_eq!(partial.period, Period::Last7Days);
-    assert_eq!(partial.window.width, 600);
-    assert_eq!(partial.window.height, Config::default().window.height);
+    assert_eq!(partial.widget.anchor, Anchor::BottomLeft);
+    assert_eq!(partial.widget.layer, Layer::Bottom);
     assert_eq!(partial.tools, Tool::ALL);
     assert!(partial.tray);
 }
@@ -26,10 +30,12 @@ fn saved_settings_round_trip() {
         period: Period::ThisMonth,
         tray: false,
         tools: vec![Tool::Codex, Tool::ClaudeCode],
-        window: Window {
-            maximized: true,
-            ..Window::default()
+        widget: Widget {
+            layer: Layer::Overlay,
+            output: "DP-1".into(),
+            ..Widget::default()
         },
+        legacy_window: None,
     };
     config.save(&path).unwrap();
 
@@ -49,6 +55,7 @@ fn invalid_files_are_errors() {
         "tools = [\"cursor\"]",
         "tray = \"yes\"",
         "unknown = 1",
+        "[widget]\nlayer = \"desktop\"",
         "period = ",
     ] {
         assert!(Config::parse(text).is_err(), "{text}");

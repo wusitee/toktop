@@ -11,16 +11,17 @@ toktop reads the local logs of AI coding tools, turns them into usage events and
 | `toktop-watch` | Blocks on inotify and forwards changed paths to the worker. |
 | ksni service, `toktop-tray` | Serve the tray icon over D-Bus and push tooltip updates; tray clicks and menu items are forwarded to the GTK main thread. Present only when the tray is registered. |
 
-The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The UI updates row text in place while a list keeps the same rows in the same order, and rebuilds the list only when rows appear, disappear, reorder or gain detail rows. This keeps focus, scroll position and expansion through live updates and keeps per-update CPU low.
+The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The widget builds a fixed number of row slots once and only changes their text and visibility on update; it never rebuilds widgets. This keeps per-update CPU low.
 
 ## Application lifecycle
 
-`Shell` (in `src/ui/mod.rs`) lives for the whole process. It owns the worker, the latest summary, the settings ([configuration.md](configuration.md)) and the tray icon. The window is built on demand from the latest summary and dropped when closed.
+`Shell` (in `src/ui/mod.rs`) lives for the whole process. It owns the worker, the latest summary, the settings ([configuration.md](configuration.md)) and the tray icon. The widget window is built on demand from the latest summary and dropped when hidden.
 
-- toktop is a single-instance `GApplication`. Running `toktop` while it is already running shows the existing window; `toktop --background` then does nothing.
-- When the tray icon is registered, the application holds itself open, so closing the window keeps toktop in the tray. Without a tray host, closing the window quits, and `--background` opens the window instead.
-- Clicking the tray icon toggles the window. Its menu shows the window, changes the period, refreshes prices or quits.
-- The period and window size are saved to the config file when they change.
+- toktop is a single-instance `GApplication`. Running `toktop` while it is already running shows the existing widget; `toktop --background` then does nothing; `toktop --toggle` activates the primary instance's `app.toggle` action over D-Bus.
+- When the compositor supports wlr-layer-shell and `widget.layer` is not `window`, the window becomes a layer surface (`src/ui/layer.rs`, a few direct bindings to libgtk4-layer-shell). Otherwise it is an ordinary window.
+- The application holds itself open while a layer widget or tray icon exists, so hiding the widget keeps toktop running. A plain window without a tray icon quits when closed.
+- Toggling closes an open layer widget. An open ordinary window is raised first if it is not focused.
+- The period is saved to the config file when it changes.
 
 ## Data flow
 
@@ -34,13 +35,13 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 |---|---|
 | `src/parse/` | One parser per tool, plus a minimal protobuf reader for Antigravity. |
 | `src/store.rs` | Index of every source file and its parsed session. Discovers files, re-reads changed ones and loads tool-side title indexes. |
-| `src/aggregate.rs` | Builds a `Summary` for a period: totals, breakdowns by tool, model, project and session, daily history, live token rate. |
+| `src/aggregate.rs` | Builds a `Summary` for a period: totals, breakdowns by tool, model, project and session (with subagents grouped), daily history, streak, live token rate and average speed. |
 | `src/pricing.rs`, `src/pricing/aliases.rs` | LiteLLM price table, reduced and cached; tool model aliases; cost per request. |
 | `src/model.rs` | Shared types: `Tool`, `Tokens`, `Event`, `Session`, rate limits. |
 | `src/paths.rs` | Source and cache locations, with the tools' environment overrides. |
 | `src/watch.rs` | Recursive inotify watcher. |
 | `src/worker.rs` | Worker thread loop. |
-| `src/ui/` | Application shell, GTK 4 / libadwaita window, daily chart and tray icon. |
+| `src/ui/` | Application shell (`mod.rs`), the card (`widget.rs`, `style.css`), heatmap and trend charts, layer-shell bindings and tray icon. |
 | `src/config.rs` | Settings file. |
 
 ## Incremental reads
@@ -65,13 +66,13 @@ Run `TOKTOP_DEBUG=1 toktop` to print timestamped stderr lines for window `close-
 
 ## Memory
 
-glibc is limited to one malloc arena (`M_ARENA_MAX=1`) at startup, and the heap is trimmed after full scans and after the window closes. Without this the parallel initial scan leaves about 20 MB stranded in per-thread arenas. The retained data for ~11K events is about 4 MB; most of the remaining footprint is GTK's own.
+glibc is limited to one malloc arena (`M_ARENA_MAX=1`) at startup, and the heap is trimmed after full scans and after the widget is hidden. Without this the parallel initial scan leaves about 20 MB stranded in per-thread arenas. The retained data for ~11K events is about 4 MB; most of the remaining footprint is GTK's own.
 
-Started with `--background`, toktop uses about 25 MB PSS until the window is first opened. GTK keeps its style, icon and renderer caches after that, so closing the window again leaves about 48 MB; repeated open/close cycles do not grow it. With the window open, GTK's accessibility objects add roughly 15 MB on a desktop session with an accessibility bus.
+With the widget shown, toktop uses about 35 MB PSS under GTK's cairo renderer (`GSK_RENDERER=cairo`); the GL and Vulkan renderers add driver memory on top. GTK keeps its style, icon and renderer caches after the widget is hidden, so hiding it frees little, and repeated show/hide cycles do not grow it. On a desktop session with an accessibility bus, GTK's accessibility objects add roughly 15 MB while the widget is shown.
 
 ## Periods
 
-Periods use local time: Today, This week (from Monday), Last 7 days, This month, Last 30 days and All time. The live token rate is tokens per minute over the last five minutes.
+Periods use local time: Today, This week (from Monday), Last 7 days, This month, Last 30 days and All time. The widget's switcher offers Today, This week, This month and All time; the others are available from the tray menu and the config file. The live token rate is tokens per minute over the last five minutes. The streak counts consecutive days with usage ending today, or yesterday when today has none yet. Average speed is described in [accounting.md](accounting.md#response-time-and-speed).
 
 ## Project grouping
 

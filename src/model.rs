@@ -58,6 +58,10 @@ fn is_zero(value: &u64) -> bool {
     *value == 0
 }
 
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
+}
+
 fn is_false(value: &bool) -> bool {
     !value
 }
@@ -140,6 +144,10 @@ pub struct Event {
     /// Raw Claude 1-hour cache-write maximum, before clamping to the total.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub cache_write_1h_raw: u64,
+    /// Response time in milliseconds, from the request (the last prompt or
+    /// tool result) to the last output written; 0 when unknown.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub duration_ms: u32,
 }
 
 impl Event {
@@ -158,6 +166,9 @@ impl Event {
             .max(other.cache_write_1h_raw)
             .max(self.tokens.cache_write_1h);
         self.tokens.cache_write_1h = self.cache_write_1h_raw.min(self.tokens.cache_write);
+        if self.duration_ms == 0 {
+            self.duration_ms = other.duration_ms;
+        }
     }
 }
 
@@ -168,6 +179,12 @@ pub struct Session {
     /// Working directory the session ran in.
     pub project: Option<String>,
     pub title: Option<String>,
+    /// Start of the first user prompt, shown when there is no title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Session that spawned this one as a subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     pub models: Vec<String>,
     pub events: Vec<Event>,
     /// Latest Codex rate-limit snapshot observed in this file.

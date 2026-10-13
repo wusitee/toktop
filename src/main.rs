@@ -4,7 +4,7 @@ use toktop::aggregate::{self, Period};
 use toktop::{format, store::Store};
 
 fn usage() -> ! {
-    eprintln!("usage: toktop [--background | --print [today|week|7d|month|30d|all]]");
+    eprintln!("usage: toktop [--background | --toggle | --print [today|week|7d|month|30d|all]]");
     std::process::exit(2);
 }
 
@@ -28,9 +28,10 @@ fn main() -> std::process::ExitCode {
     limit_malloc_arenas();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None | Some("--background") => {
+        None | Some("--background" | "--toggle") if args.len() <= 1 => {
             let options = ui::Options {
-                background: !args.is_empty(),
+                background: args.first().is_some_and(|arg| arg == "--background"),
+                toggle: args.first().is_some_and(|arg| arg == "--toggle"),
             };
             if ui::run(options) == gtk::glib::ExitCode::SUCCESS {
                 std::process::ExitCode::SUCCESS
@@ -72,6 +73,7 @@ fn print(period: Option<&str>) {
         }
     };
     let total = &summary.total;
+    let speed = |usage: &aggregate::Usage| usage.speed().map_or_else(String::new, format::speed);
     println!(
         "{}: {} tokens, {}, {} requests",
         period.label(),
@@ -79,13 +81,17 @@ fn print(period: Option<&str>) {
         cost(total.cost),
         total.requests
     );
+    if let Some(value) = total.speed() {
+        println!("Average speed {}", format::speed(value));
+    }
     println!("\nBy tool");
     for (tool, usage) in &summary.by_tool {
         println!(
-            "  {:<14} {:>8}  {:>9}",
+            "  {:<14} {:>8}  {:>9}  {:>9}",
             tool.label(),
             format::tokens(usage.tokens.total()),
-            cost(usage.cost)
+            cost(usage.cost),
+            speed(usage)
         );
     }
     for (title, rows) in [
@@ -95,10 +101,11 @@ fn print(period: Option<&str>) {
         println!("\n{title}");
         for row in rows.iter().take(10) {
             println!(
-                "  {:<28} {:>8}  {:>9}",
+                "  {:<28} {:>8}  {:>9}  {:>9}",
                 row.label,
                 format::tokens(row.usage.tokens.total()),
-                cost(row.usage.cost)
+                cost(row.usage.cost),
+                speed(&row.usage)
             );
         }
     }

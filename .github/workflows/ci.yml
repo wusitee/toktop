@@ -15,7 +15,7 @@ jobs:
     container: archlinux:latest
     steps:
       - name: Install system packages
-        run: pacman -Syu --noconfirm --needed base-devel git rustup gtk4 libadwaita sqlite
+        run: pacman -Syu --noconfirm --needed base-devel git rustup gtk4 libadwaita gtk4-layer-shell sqlite
       - uses: actions/checkout@v4
       - name: Install Rust
         run: rustup default stable && rustup component add clippy rustfmt

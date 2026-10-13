@@ -60,6 +60,21 @@ Source: `gen_metadata` rows, each a protobuf without a published schema. Field n
 3. A planner response step (`step_type = 15`) joined by response id (`metadata.#9.#11`), then by generation index (`metadata.#20.#3`).
 4. Session creation time, or the file's mtime.
 
+## Response time and speed
+
+Each event may carry a response time (`duration_ms`): from the request, the latest prompt or tool result before the response, to the last output written for it. It includes time to first token, thinking and any retries, so speeds are end-to-end and lower than a model's raw decode rate.
+
+- **Claude Code.** The request starts at the latest `user` or `attachment` line; the response ends at the last copy of its `message.id` + `requestId`.
+- **Codex.** The request starts at the latest input `response_item` (a user message or a tool call output) and ends at the last output item (reasoning, an assistant message or any `*_call`) before its `token_count`. Tool outputs written after the model's output start the next request. Both are read from the line prefix (`{"timestamp":…,"type":"response_item","payload":{"type":…`), so other rows are never JSON-parsed.
+- **Antigravity.** No response time.
+
+Times of zero or over 15 minutes (a lost request start) are discarded. Average speed is the ratio of sums, output plus reasoning tokens over response time, across timed requests; untimed requests do not count.
+
+## Sessions
+
+- **Titles**, in order: the tool's title index (Codex `session_index.jsonl`, Antigravity summaries), the transcript's own title (Claude `custom-title`, then `ai-title`, then `summary`), the start of the first typed prompt, then the session id. Prompts skip injected context: Claude `isMeta` lines and tool results, and text starting with `<`, `# AGENTS.md` or `Caveat:`. Whitespace is collapsed and the prompt cut to 120 characters.
+- **Subagents.** A Codex rollout spawned by another (`source.subagent.thread_spawn.parent_thread_id`) is grouped under its top-level session, following nested spawns. The session row sums their usage, counts subagents with usage in the period, and lists every model used, most tokens first.
+
 ## Cross-file deduplication
 
 A response copied into several files (resumed or forked sessions) is counted once, at aggregation time, using each event's stable key. Copies merge with the same rules as Claude streaming copies: per-field maxima, split-derived input replacing bare input, and the raw 1-hour cache-write maximum clamped only after merging. Events keep the input-split provenance and the raw split across files for this.
