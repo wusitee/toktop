@@ -1,6 +1,7 @@
 //! toktop core: reads AI coding tool logs and aggregates token usage.
 
 pub mod aggregate;
+pub mod config;
 pub mod format;
 pub mod model;
 pub mod parse;

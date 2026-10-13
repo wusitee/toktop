@@ -4,7 +4,7 @@ use toktop::aggregate::{self, Period};
 use toktop::{format, store::Store};
 
 fn usage() -> ! {
-    eprintln!("usage: toktop [--print [today|week|7d|month|30d|all]]");
+    eprintln!("usage: toktop [--background | --print [today|week|7d|month|30d|all]]");
     std::process::exit(2);
 }
 
@@ -28,8 +28,11 @@ fn main() -> std::process::ExitCode {
     limit_malloc_arenas();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None => {
-            if ui::run() == gtk::glib::ExitCode::SUCCESS {
+        None | Some("--background") => {
+            let options = ui::Options {
+                background: !args.is_empty(),
+            };
+            if ui::run(options) == gtk::glib::ExitCode::SUCCESS {
                 std::process::ExitCode::SUCCESS
             } else {
                 std::process::ExitCode::FAILURE
@@ -44,14 +47,8 @@ fn main() -> std::process::ExitCode {
 }
 
 fn print(period: Option<&str>) {
-    let period = match period.unwrap_or("today") {
-        "today" => Period::Today,
-        "week" => Period::ThisWeek,
-        "7d" => Period::Last7Days,
-        "month" => Period::ThisMonth,
-        "30d" => Period::Last30Days,
-        "all" => Period::AllTime,
-        _ => usage(),
+    let Some(period) = Period::from_key(period.unwrap_or("today")) else {
+        usage();
     };
     let (mut prices, stale) = toktop::cached_prices();
     if stale {
@@ -60,7 +57,10 @@ fn print(period: Option<&str>) {
             Err(error) => eprintln!("toktop: price refresh failed: {error}"),
         }
     }
-    let mut store = Store::default();
+    let tools = toktop::config::Config::load(&toktop::config::path())
+        .map(|config| config.tools)
+        .unwrap_or_else(|_| toktop::model::Tool::ALL.to_vec());
+    let mut store = Store::with_tools(tools);
     store.sync_all();
     let summary = aggregate::summarize(&store, &prices, period, toktop::now_ms());
 

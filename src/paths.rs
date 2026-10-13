@@ -56,14 +56,19 @@ pub fn codex_session_index() -> PathBuf {
         .join("session_index.jsonl")
 }
 
-/// Files outside the source roots that hold session titles.
-pub fn title_sources() -> Vec<PathBuf> {
-    let mut sources = vec![codex_session_index()];
-    sources.extend(
-        antigravity_homes()
-            .into_iter()
-            .map(|home| home.join("conversation_summaries.db")),
-    );
+/// Files outside the source roots that hold session titles for `tools`.
+pub fn title_sources(tools: &[Tool]) -> Vec<PathBuf> {
+    let mut sources = Vec::new();
+    if tools.contains(&Tool::Codex) {
+        sources.push(codex_session_index());
+    }
+    if tools.contains(&Tool::Antigravity) {
+        sources.extend(
+            antigravity_homes()
+                .into_iter()
+                .map(|home| home.join("conversation_summaries.db")),
+        );
+    }
     sources
 }
 

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=toktop
+Comment=Token usage of AI coding tools, in the tray
+Exec=toktop --background
+Icon=utilities-system-monitor
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

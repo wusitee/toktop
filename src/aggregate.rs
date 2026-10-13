@@ -38,6 +38,22 @@ impl Period {
         }
     }
 
+    /// Short name used on the command line and in the config file.
+    pub fn key(self) -> &'static str {
+        match self {
+            Period::Today => "today",
+            Period::ThisWeek => "week",
+            Period::Last7Days => "7d",
+            Period::ThisMonth => "month",
+            Period::Last30Days => "30d",
+            Period::AllTime => "all",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Period> {
+        Period::ALL.into_iter().find(|period| period.key() == key)
+    }
+
     /// First local day included in the period.
     pub fn start(self, today: NaiveDate) -> NaiveDate {
         match self {

@@ -18,6 +18,8 @@ pub enum Msg {
     WatchCoverage(bool),
     Period(Period),
     Prices(PriceTable),
+    /// Download prices now instead of waiting for the daily refresh.
+    RefreshPrices,
 }
 
 /// Quiet time after a change before it is applied.
@@ -34,11 +36,12 @@ const PRICE_RETRY: Duration = Duration::from_secs(60 * 60);
 /// for the selected period changes, and on every clock tick.
 pub fn spawn(
     period: Period,
+    tools: Vec<Tool>,
     emit: impl FnMut(Summary) + Send + 'static,
 ) -> io::Result<Sender<Msg>> {
     let (tx, rx) = mpsc::channel();
     let state = State {
-        store: Store::default(),
+        store: Store::with_tools(tools),
         prices: PriceTable::default(),
         period,
         last: None,
@@ -53,7 +56,7 @@ pub fn spawn(
 
 /// Returns memory freed after a scan to the OS. A parallel scan leaves most
 /// of its transient allocations in per-thread glibc arenas otherwise.
-fn trim_heap() {
+pub fn trim_heap() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         unsafe extern "C" {
@@ -84,15 +87,17 @@ impl<E: FnMut(Summary)> State<E> {
     }
 
     fn run(mut self, rx: mpsc::Receiver<Msg>, tx: Sender<Msg>) {
-        let mut roots: Vec<PathBuf> = Tool::ALL
-            .into_iter()
+        let tools = self.store.tools.clone();
+        let mut roots: Vec<PathBuf> = tools
+            .iter()
+            .copied()
             .flat_map(paths::source_roots)
             .collect();
         roots.sort();
         roots.dedup();
         let watch_tx = tx.clone();
         // Watch before scanning so writes during the scan are queued.
-        let watcher = watch::spawn(roots, paths::title_sources(), move |change| {
+        let watcher = watch::spawn(roots, paths::title_sources(&tools), move |change| {
             let _ = watch_tx.send(match change {
                 watch::Change::Paths(paths) => Msg::Changed(paths),
                 watch::Change::Rescan => Msg::Rescan,
@@ -168,6 +173,7 @@ impl<E: FnMut(Summary)> State<E> {
                     self.publish(false);
                     trim_heap();
                 }
+                Ok(Msg::RefreshPrices) => next_price_fetch = Some(Instant::now()),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
