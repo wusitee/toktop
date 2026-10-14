@@ -1,12 +1,13 @@
 //! Per-tool source parsers.
 //!
-//! Claude Code, Codex and Pi write append-only JSONL, so their parsers keep a
+//! Claude Code, Codex, Pi and Kimi Code write append-only JSONL, so their parsers keep a
 //! [`Cursor`] and consume only bytes appended since the previous read.
 //! Antigravity writes SQLite databases, which are re-read whole on change.
 
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
+pub mod kimi;
 pub mod pi;
 pub mod proto;
 
@@ -35,6 +36,7 @@ pub enum LineState {
     Claude(claude::State),
     Codex(Box<codex::State>),
     Pi(pi::State),
+    Kimi(kimi::State),
 }
 
 impl LineState {
@@ -44,6 +46,7 @@ impl LineState {
             Tool::Codex => Some(LineState::Codex(Box::default())),
             Tool::Antigravity => None,
             Tool::Pi => Some(LineState::Pi(pi::State::default())),
+            Tool::Kimi => Some(LineState::Kimi(kimi::State::default())),
         }
     }
 
@@ -52,6 +55,7 @@ impl LineState {
             LineState::Claude(state) => state.line(session, line),
             LineState::Codex(state) => state.line(session, line),
             LineState::Pi(state) => state.line(session, line),
+            LineState::Kimi(state) => state.line(session, line),
         }
     }
 }
@@ -61,6 +65,9 @@ pub fn parse_full(tool: Tool, path: &Path) -> io::Result<(Session, Option<Cursor
     match LineState::new(tool) {
         Some(state) => {
             let mut session = Session::default();
+            if tool == Tool::Kimi {
+                kimi::identify(&mut session, path);
+            }
             let mut cursor = Cursor {
                 offset: 0,
                 inode: 0,

@@ -53,6 +53,7 @@ fn sync_all_reloads_titles_without_transcript_changes() {
             .env(CHILD, "1")
             .env("HOME", dir.path())
             .env("CODEX_HOME", dir.path().join("codex"))
+            .env("KIMI_CODE_HOME", dir.path().join("kimi"))
             .env("CLAUDE_CONFIG_DIR", dir.path().join("claude"))
             .env("XDG_CONFIG_HOME", dir.path().join("config"))
             .status()

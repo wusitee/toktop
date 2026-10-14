@@ -1107,3 +1107,98 @@ fn pi_reads_normalized_usage_titles_and_response_time() {
     assert_eq!(event.key.as_deref(), Some("response:r1"));
     assert_eq!(event.duration_ms, 3000);
 }
+
+#[test]
+fn kimi_reads_agent_wires_titles_and_response_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let session = dir.path().join("wd_app_0123/session_k1");
+    let main = session.join("agents/main/wire.jsonl");
+    let sub = session.join("agents/agent_2/wire.jsonl");
+    std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
+    write(
+        &main,
+        concat!(
+            r#"{"type":"metadata","protocol_version":"1.5","created_at":1790848800000}"#,
+            "\n",
+            r#"{"type":"profile.bind","agentId":"main","modelAlias":"kimi-code/k3","environmentDisclosure":{"cwd":"/work/app"}}"#,
+            "\n",
+            r#"{"type":"llm.request","agentId":"main","kind":"loop","model":"k3","time":1790848801000}"#,
+            "\n",
+            // A side call does not move the loop request's start.
+            r#"{"type":"llm.request","agentId":"main","kind":"title","model":"k3","time":1790848802000}"#,
+            "\n",
+            // Usage outside a turn counts but answers no loop request.
+            r#"{"type":"usage.record","agentId":"main","model":"kimi-code/k3","usage":{"inputOther":5,"output":2,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"session","time":1790848802500}"#,
+            "\n",
+            r#"{"type":"usage.record","agentId":"main","model":"kimi-code/k3","usage":{"inputOther":100,"output":50,"inputCacheRead":900,"inputCacheCreation":40},"usageScope":"turn","time":1790848804000}"#,
+            "\n",
+            // A cancelled turn's request does not time the next turn.
+            r#"{"type":"llm.request","agentId":"main","kind":"loop","model":"k3","time":1790848810000}"#,
+            "\n",
+            r#"{"type":"turn.ended","agentId":"main","turnId":1,"reason":"cancelled","time":1790848811000}"#,
+            "\n",
+            // Nor does one cut off without `turn.ended` (Kimi exited).
+            r#"{"type":"llm.request","agentId":"main","kind":"loop","model":"k3","time":1790848820000}"#,
+            "\n",
+            r#"{"type":"turn.prompt","agentId":"main","input":[{"type":"text","text":"go on"}]}"#,
+            "\n",
+            r#"{"type":"llm.request","agentId":"main","kind":"loop","model":"k3","time":1790848880000}"#,
+            "\n",
+            r#"{"type":"usage.record","agentId":"main","model":"kimi-code/k3","usage":{"inputOther":1,"output":1,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1790848881000}"#,
+            "\n",
+        ),
+    );
+    write(
+        &sub,
+        concat!(
+            r#"{"type":"usage.record","agentId":"agent_2","model":"kimi-code/k3-256k","usage":{"inputOther":7,"output":3,"inputCacheRead":0,"inputCacheCreation":0},"usageScope":"turn","time":1790848805000}"#,
+            "\n",
+        ),
+    );
+    write(
+        &session.join("state.json"),
+        r#"{"id":"session_k1","title":"Kimi work","titleKind":"generated"}"#,
+    );
+    // A title copied from an injected prompt is not shown.
+    let other = dir.path().join("wd_app_0123/session_k2");
+    std::fs::create_dir_all(&other).unwrap();
+    write(
+        &other.join("state.json"),
+        r#"{"id":"session_k2","title":"<instructions> do","titleKind":"replaceable"}"#,
+    );
+
+    let (session, _) = parse::parse_full(Tool::Kimi, &main).unwrap();
+    assert_eq!(session.id, "k1");
+    assert_eq!(session.parent, None);
+    assert_eq!(session.project.as_deref(), Some("/work/app"));
+    assert_eq!(session.events.len(), 3);
+    assert_eq!(session.events[0].duration_ms, 0);
+    assert_eq!(session.events[2].duration_ms, 1000);
+    let event = &session.events[1];
+    assert_eq!(
+        event.tokens,
+        Tokens {
+            input: 100,
+            output: 50,
+            cache_read: 900,
+            cache_write: 40,
+            cache_write_1h: 0,
+            reasoning: 0,
+        }
+    );
+    assert_eq!(event.duration_ms, 3000);
+    assert_eq!(
+        event.key.as_deref(),
+        Some("main:1790848804000:kimi-code/k3:100:50:900:40")
+    );
+
+    let (subagent, _) = parse::parse_full(Tool::Kimi, &sub).unwrap();
+    assert_eq!(subagent.id, "k1/agent_2");
+    assert_eq!(subagent.parent.as_deref(), Some("k1"));
+    assert_eq!(subagent.models, ["kimi-code/k3-256k"]);
+
+    let titles = parse::kimi::titles(dir.path());
+    assert_eq!(titles.len(), 1);
+    assert_eq!(titles["k1"], "Kimi work");
+}

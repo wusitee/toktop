@@ -128,13 +128,14 @@ pub struct PriceTable {
 }
 
 /// Provider prefixes preferred when a model is listed only under prefixed keys.
-const FIRST_PARTY: [&str; 6] = [
+const FIRST_PARTY: [&str; 7] = [
     "openai/",
     "anthropic/",
     "gemini/",
     "xai/",
     "vertex_ai/",
     "deepseek/",
+    "moonshot/",
 ];
 
 impl PriceTable {

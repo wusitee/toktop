@@ -7,7 +7,7 @@ Most settings can also be changed in the settings window: right-click the widget
 ```toml
 period = "today"                               # today, week, 7d, month, 30d or all
 tray = true                                    # show a tray icon when a panel supports it
-tools = ["claude-code", "codex", "antigravity", "pi"]
+tools = ["claude-code", "codex", "antigravity", "pi", "kimi-code"]
 
 [widget]
 layer = "bottom"      # background, bottom, top, overlay or window
@@ -31,7 +31,7 @@ trend = true
 |---|---|---|
 | `period` | `"today"` | Period shown at startup. Changing the period in the widget or the tray menu saves it. |
 | `tray` | `true` | Register a StatusNotifierItem tray icon. Needs a panel that hosts one, such as waybar, KDE Plasma, or GNOME with the AppIndicator extension. |
-| `tools` | all four | Tools whose logs are read and watched. A disabled tool's directories are not scanned or watched, and its data is dropped. |
+| `tools` | all five | Tools whose logs are read and watched. A disabled tool's directories are not scanned or watched, and its data is dropped. |
 | `widget.layer` | `"bottom"` | Where the widget lives; see [Layers](#layers). |
 | `widget.anchor` | `"top-right"` | Screen position of a layer widget. |
 | `widget.margin` | `16` | Distance in pixels from the anchored edges. |
@@ -59,14 +59,24 @@ The card never grows taller than its monitor; longer content scrolls. On Hyprlan
 
 ### Hyprland
 
-```ini
-# ~/.config/hypr/hyprland.conf
-exec-once = toktop --background
-bind = SUPER, T, exec, toktop --toggle
-layerrule = blur on, ignore_alpha 0.5, match:namespace toktop
+```lua
+-- ~/.config/hypr/hyprland.lua
+hl.on("hyprland.start", function()
+    hl.exec_cmd("toktop --background")
+end)
+hl.bind("SUPER + T", hl.dsp.exec_cmd("toktop --toggle"))
+hl.layer_rule({ match = { namespace = "^toktop$" }, blur = true, ignore_alpha = 0.5 })
 ```
 
-With the Lua configuration of newer Hyprland versions, the layer rule is `hl.layer_rule({ match = { namespace = "toktop" }, blur = true, ignore_alpha = 0.5 })`. The layer namespace is `toktop` on every compositor.
+With the older hyprlang configuration (`hyprland.conf`):
+
+```ini
+exec-once = toktop --background
+bind = SUPER, T, exec, toktop --toggle
+layerrule = blur on, ignore_alpha 0.5, match:namespace ^toktop$
+```
+
+The layer namespace is `toktop` on every compositor.
 
 ## Style
 
@@ -83,7 +93,7 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 | `toktop_bg`, `toktop_fg`, `toktop_dim`, `toktop_line` | Card background, text, secondary text, separators and borders |
 | `toktop_accent` | Heatmap, trend line and limit bars (the charts draw in the CSS `color` of `.heatmap` and `.trend`) |
 | `toktop_live`, `toktop_warn` | Live indicator; price notices and nearly exhausted limits |
-| `toktop_claude`, `toktop_openai`, `toktop_gemini`, `toktop_deepseek`, `toktop_pi`, `toktop_other` | Model and tool dots (`.dot.claude`, …) |
+| `toktop_claude`, `toktop_openai`, `toktop_gemini`, `toktop_deepseek`, `toktop_pi`, `toktop_kimi`, `toktop_other` | Model and tool dots (`.dot.claude`, …) |
 
 ## Command line
 
@@ -99,5 +109,5 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 
 | Variable | Effect |
 |---|---|
-| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR` | Tool data locations; see [sources.md](sources.md). |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `KIMI_CODE_HOME` | Tool data locations; see [sources.md](sources.md). |
 | `TOKTOP_DEBUG` | Log window and application lifecycle events to stderr; see [architecture.md](architecture.md#debugging). |

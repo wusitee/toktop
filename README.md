@@ -2,7 +2,7 @@
 
 A native Linux desktop widget for AI coding tool token usage, written in Rust with GTK 4 and libadwaita. It is a lightweight reimplementation of [Token Monitor](https://github.com/Javis603/token-monitor) for Linux, running as a single process that updates within about a second of each turn.
 
-Supported tools: Claude Code, Codex, Antigravity and [Pi](https://github.com/earendil-works/pi).
+Supported tools: Claude Code, Codex, Antigravity, [Pi](https://github.com/earendil-works/pi) and Kimi Code.
 
 ## Build
 
@@ -36,13 +36,17 @@ Run `toktop` to show the widget. On Hyprland, Sway, KDE Plasma and other composi
 
 Hover a row for its full breakdown, right-click for Settings, Refresh prices, Hide and Quit. The settings window (also `toktop --settings`) turns tools on or off, chooses which parts of the card are shown, and sets layer, position, monitor and size. The look can be changed with a `style.css`; see [docs/configuration.md](docs/configuration.md).
 
-On Hyprland:
+On Hyprland, in `~/.config/hypr/hyprland.lua`:
 
-```ini
-exec-once = toktop --background
-bind = SUPER, T, exec, toktop --toggle
-layerrule = blur on, ignore_alpha 0.5, match:namespace toktop
+```lua
+hl.on("hyprland.start", function()
+    hl.exec_cmd("toktop --background")
+end)
+hl.bind("SUPER + T", hl.dsp.exec_cmd("toktop --toggle"))
+hl.layer_rule({ match = { namespace = "^toktop$" }, blur = true, ignore_alpha = 0.5 })
 ```
+
+For the older `hyprland.conf` syntax, see [docs/configuration.md](docs/configuration.md#hyprland).
 
 With a panel that hosts tray icons (waybar, KDE Plasma, GNOME with the AppIndicator extension), toktop also shows a tray icon: click it to show or hide the widget, or use its menu to change the period, open settings or quit. To start at login on other desktops:
 
