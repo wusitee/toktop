@@ -380,10 +380,13 @@ impl Shell {
         // Escape dismisses a widget the user summoned over other windows.
         if !layered || !settings.layer.is_desktop() {
             let keys = gtk::EventControllerKey::new();
-            let target = window.clone();
+            // Weak: the window owns this controller.
+            let target = window.downgrade();
             keys.connect_key_pressed(move |_, key, _, _| {
                 if key == gdk::Key::Escape {
-                    target.close();
+                    if let Some(window) = target.upgrade() {
+                        window.close();
+                    }
                     glib::Propagation::Stop
                 } else {
                     glib::Propagation::Proceed

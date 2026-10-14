@@ -227,6 +227,49 @@ fn codex_request_duration_spans_input_to_last_output() {
     text += &codex_count("2026-10-01T10:00:34Z", 2000, 950, 0, 50, 0);
     // A request whose start was not logged has no duration.
     text += &codex_count("2026-10-01T10:00:40Z", 3000, 950, 0, 50, 0);
+    // Nor one whose only earlier input was consumed by a previous request.
+    text += &item("2026-10-01T10:00:45Z", r#"{"type":"reasoning","id":"r2"}"#);
+    text += &codex_count("2026-10-01T10:00:46Z", 4000, 950, 0, 50, 0);
+    // An unchanged snapshot mid-response does not end the request, and a
+    // tool result logged in the same millisecond as its call starts the next.
+    text += &item(
+        "2026-10-01T10:01:00Z",
+        r#"{"type":"message","id":"m3","role":"user","content":[]}"#,
+    );
+    text += &item("2026-10-01T10:01:02Z", r#"{"type":"reasoning","id":"r3"}"#);
+    text += &codex_count("2026-10-01T10:01:03Z", 4000, 950, 0, 50, 0);
+    text += &item(
+        "2026-10-01T10:01:04Z",
+        r#"{"type":"function_call","name":"shell"}"#,
+    );
+    text += &item(
+        "2026-10-01T10:01:04Z",
+        r#"{"type":"function_call_output","call_id":"c2"}"#,
+    );
+    text += &codex_count("2026-10-01T10:01:05Z", 5000, 950, 0, 50, 0);
+    text += &item(
+        "2026-10-01T10:01:06Z",
+        r#"{"type":"message","id":"m4","role":"assistant","content":[]}"#,
+    );
+    text += &codex_count("2026-10-01T10:01:07Z", 6000, 950, 0, 50, 0);
+    // An aborted turn's unfinished response does not lend its start to the
+    // next turn.
+    text += &item(
+        "2026-10-01T10:02:00Z",
+        r#"{"type":"message","id":"m5","role":"user","content":[]}"#,
+    );
+    text += &item("2026-10-01T10:02:02Z", r#"{"type":"reasoning","id":"r5"}"#);
+    text += &codex_count("2026-10-01T10:02:03Z", 6000, 950, 0, 50, 0);
+    text += "{\"timestamp\":\"2026-10-01T10:02:04Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"turn_aborted\"}}\n";
+    text += &item(
+        "2026-10-01T10:02:20Z",
+        r#"{"type":"message","id":"m6","role":"user","content":[]}"#,
+    );
+    text += &item(
+        "2026-10-01T10:02:24Z",
+        r#"{"type":"message","id":"m7","role":"assistant","content":[]}"#,
+    );
+    text += &codex_count("2026-10-01T10:02:25Z", 7000, 950, 0, 50, 0);
     write(&path, &text);
 
     let (session, _) = parse::parse_full(Tool::Codex, &path).unwrap();
@@ -235,7 +278,7 @@ fn codex_request_duration_spans_input_to_last_output() {
         .iter()
         .map(|event| event.duration_ms)
         .collect();
-    assert_eq!(durations, [4000, 3000, 0]);
+    assert_eq!(durations, [4000, 3000, 0, 0, 4000, 2000, 4000]);
     assert_eq!(session.prompt.as_deref(), Some("Add a widget"));
 }
 
