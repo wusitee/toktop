@@ -5,8 +5,19 @@
 //! `cacheWrite` are disjoint, `output` includes `reasoning`, and
 //! `cacheWrite1h` is a subset of `cacheWrite`.
 //!
+//! Usage also appears outside assistant messages: on tool results (nested
+//! model work), `compaction` and `branch_summary` entries (summaries) and
+//! standalone `usage` entries (such as cache warming). Pi counts all of them
+//! in its session totals. Only `usage` entries name their model; the others
+//! may cover any model, or several, so they count under `unknown` rather
+//! than borrowing the conversation's model and its price.
+//!
+//! An assistant message's `responseModel`, recorded when the provider
+//! answered with a different model (a server-side fallback), wins over the
+//! requested `model`.
+//!
 //! Entries form a tree; abandoned branches still consumed tokens, so every
-//! assistant entry counts. `/fork` and `/clone` copy entries into a new file,
+//! usage-bearing entry counts. `/fork` and `/clone` copy entries into a new file,
 //! so events are keyed by the provider response id, or by entry id and
 //! message time, and counted once across files.
 //!
@@ -31,12 +42,18 @@ struct Line {
     cwd: Option<String>,
     name: Option<String>,
     message: Option<Message>,
+    /// On `compaction`, `branch_summary` and `usage` entries.
+    usage: Option<Usage>,
+    /// On `usage` entries.
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Message {
     role: Option<String>,
     model: Option<String>,
+    #[serde(rename = "responseModel")]
+    response_model: Option<String>,
     usage: Option<Usage>,
     #[serde(rename = "responseId")]
     response_id: Option<String>,
@@ -74,7 +91,7 @@ impl Usage {
 
 impl State {
     pub fn line(&mut self, session: &mut Session, raw: &[u8]) {
-        let wanted = (contains(raw, b"\"role\":\"assistant\"") && contains(raw, b"\"usage\""))
+        let wanted = contains(raw, b"\"usage\"")
             || (!self.have_header && contains(raw, b"\"type\":\"session\""))
             || contains(raw, b"\"type\":\"session_info\"")
             || (session.prompt.is_none() && contains(raw, b"\"role\":\"user\""));
@@ -101,10 +118,30 @@ impl State {
             }
             Some("message") => {
                 let Some(message) = line.message else { return };
+                let written = line.timestamp.as_deref().and_then(parse_ts);
                 match message.role.as_deref() {
                     Some("assistant") => {
-                        let ts = line.timestamp.as_deref().and_then(parse_ts);
-                        assistant(session, ts, line.id, message);
+                        let model = message
+                            .response_model
+                            .clone()
+                            .filter(|model| !model.is_empty())
+                            .or_else(|| message.model.clone());
+                        let start = message.timestamp;
+                        let key = match message.response_id.as_deref() {
+                            Some(response) if !response.is_empty() => {
+                                Some(format!("response:{response}"))
+                            }
+                            _ => entry_key(&line.id, start.or(written)),
+                        };
+                        if let Some(usage) = &message.usage {
+                            record(session, usage, model, written.or(start), start, key);
+                        }
+                    }
+                    Some("toolResult") => {
+                        if let Some(usage) = &message.usage {
+                            let key = entry_key(&line.id, written);
+                            record(session, usage, None, written, None, key);
+                        }
                     }
                     Some("user") if session.prompt.is_none() => {
                         session.prompt = user_prompt(message.content);
@@ -112,33 +149,43 @@ impl State {
                     _ => {}
                 }
             }
+            Some("compaction" | "branch_summary" | "usage") => {
+                if let Some(usage) = &line.usage {
+                    let written = line.timestamp.as_deref().and_then(parse_ts);
+                    let key = entry_key(&line.id, written);
+                    record(session, usage, line.model.clone(), written, None, key);
+                }
+            }
             _ => {}
         }
     }
 }
 
-fn assistant(session: &mut Session, written: Option<i64>, entry: Option<String>, message: Message) {
-    let Some(usage) = &message.usage else { return };
+/// Key of an entry, stable across `/fork` and `/clone` copies.
+fn entry_key(id: &Option<String>, ts: Option<i64>) -> Option<String> {
+    Some(format!("entry:{}:{}", id.as_deref()?, ts?))
+}
+
+/// Adds one usage-bearing entry, written at `ts`. `start` is the response
+/// start, when known.
+fn record(
+    session: &mut Session,
+    usage: &Usage,
+    model: Option<String>,
+    ts: Option<i64>,
+    start: Option<i64>,
+    key: Option<String>,
+) {
     let tokens = usage.tokens();
-    let Some(ts) = written.or(message.timestamp) else {
-        return;
-    };
+    let Some(ts) = ts else { return };
     if tokens.is_empty() {
         return;
     }
-    let key = match (&message.response_id, &entry) {
-        (Some(response), _) if !response.is_empty() => Some(format!("response:{response}")),
-        (_, Some(entry)) => Some(format!("entry:{entry}:{}", message.timestamp.unwrap_or(ts))),
-        _ => None,
-    };
-    let duration_ms = message
-        .timestamp
-        .zip(written)
-        .map(|(start, end)| end - start)
+    let duration_ms = start
+        .map(|start| ts - start)
         .filter(|ms| *ms > 0 && *ms <= MAX_RESPONSE_MS)
         .map_or(0, |ms| ms as u32);
-    let model = message.model.as_deref().unwrap_or("unknown");
-    let model = session.model_index(model);
+    let model = session.model_index(model.as_deref().unwrap_or("unknown"));
     session.events.push(Event {
         ts,
         model,

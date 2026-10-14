@@ -62,10 +62,10 @@ Source: `gen_metadata` rows, each a protobuf without a published schema. Field n
 
 ## Pi
 
-Source: `usage` on assistant `message` entries. Pi normalizes every provider: `input`, `cacheRead` and `cacheWrite` are disjoint, `output` includes `reasoning`, and `cacheWrite1h` is a subset of `cacheWrite`. Reasoning is split out of output.
+Source: `usage` on assistant messages, tool results (nested model work), `compaction` and `branch_summary` entries (summaries) and standalone `usage` entries (such as cache warming), as in Pi's own session totals. Only assistant messages and `usage` entries name their model; the others may cover any model, or several, so they count under `unknown`. An assistant message's `responseModel` (set when the provider answered with a different model) wins over the requested `model`. Pi normalizes every provider: `input`, `cacheRead` and `cacheWrite` are disjoint, `output` includes `reasoning`, and `cacheWrite1h` is a subset of `cacheWrite`. Reasoning is split out of output.
 
-- Entries form a tree. Abandoned branches consumed tokens too, so every assistant entry counts.
-- `/fork` and `/clone` copy entries into a new file. Events are keyed by `responseId`, or by entry id and message timestamp, and counted once across files.
+- Entries form a tree. Abandoned branches consumed tokens too, so every usage-bearing entry counts.
+- `/fork` and `/clone` copy entries into a new file. Events are keyed by `responseId`, or by entry id and timestamp, and counted once across files.
 - Failed or aborted requests with empty usage are ignored.
 - The session id and project come from the `session` header; the title from the latest `session_info` name.
 
