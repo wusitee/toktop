@@ -88,13 +88,13 @@ fn print(period: Option<&str>) {
         println!("Average speed {}", format::speed(value));
     }
     println!("\nBy tool");
-    for (tool, usage) in &summary.by_tool {
+    for row in &summary.by_tool {
         println!(
             "  {:<14} {:>8}  {:>9}  {:>9}",
-            tool.label(),
-            format::tokens(usage.tokens.total()),
-            cost(usage.cost),
-            speed(usage)
+            row.tool.label(),
+            format::tokens(row.usage.tokens.total()),
+            cost(row.usage.cost),
+            speed(&row.usage)
         );
     }
     for (title, rows) in [

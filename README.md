@@ -34,7 +34,7 @@ Run `toktop` to show the widget. On Hyprland, Sway, KDE Plasma and other composi
 - top models, projects or tools with their speed, and recent sessions with their models and subagents
 - an activity heatmap and a 30-day trend
 
-Hover a row for its full breakdown, right-click for Settings, Refresh prices, Hide and Quit. The settings window (also `toktop --settings`) turns tools on or off, chooses which parts of the card are shown, and sets layer, position, monitor and size. The look can be changed with a `style.css`; see [docs/configuration.md](docs/configuration.md).
+Click a model, project, tool, session or heatmap day to open a detail card beside the widget: token composition, speed, cache rate and how the usage divides among models, tools and projects. Clicking another item switches the card; the same item or its close button closes it. The chevron next to the session count expands the list into a scrollable one, one row taller. Right-click for Settings, Refresh prices, Hide and Quit. The settings window (also `toktop --settings`) turns tools on or off, chooses which parts of the card are shown, and sets layer, position, monitor and size. The look can be changed with a `style.css`; see [docs/configuration.md](docs/configuration.md).
 
 On Hyprland, in `~/.config/hypr/hyprland.lua`:
 

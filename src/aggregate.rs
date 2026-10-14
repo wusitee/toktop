@@ -105,12 +105,101 @@ impl Usage {
     }
 }
 
+/// How a row's tokens divide among models, tools, projects and sessions.
+/// Each list is sorted by tokens, most first.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Split {
+    pub models: Vec<(String, u64)>,
+    pub tools: Vec<(Tool, u64)>,
+    /// Full project paths, as in [`Row::key`].
+    pub projects: Vec<(String, u64)>,
+    /// Top-level sessions with usage, subagents counted with their parent.
+    pub sessions: u32,
+}
+
+#[derive(Default)]
+struct SplitAcc<'a> {
+    models: HashMap<&'a str, u64>,
+    tools: HashMap<Tool, u64>,
+    projects: HashMap<&'a str, u64>,
+    sessions: HashSet<(Tool, &'a str)>,
+}
+
+fn add_tokens<K: std::hash::Hash + Eq>(map: &mut HashMap<K, u64>, key: K, tokens: u64) {
+    let total = map.entry(key).or_default();
+    *total = total.saturating_add(tokens);
+}
+
+fn sorted_tokens<K: Ord>(map: HashMap<K, u64>) -> Vec<(K, u64)> {
+    let mut items: Vec<(K, u64)> = map.into_iter().collect();
+    items.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    items
+}
+
+impl<'a> SplitAcc<'a> {
+    fn add(&mut self, at: &Origin<'a>, tokens: u64) {
+        add_tokens(&mut self.models, at.model, tokens);
+        add_tokens(&mut self.tools, at.tool, tokens);
+        if let Some(project) = at.project {
+            add_tokens(&mut self.projects, project, tokens);
+        }
+        self.sessions.insert((at.tool, at.root));
+    }
+
+    fn finish(self) -> Split {
+        let owned = |items: Vec<(&str, u64)>| {
+            items
+                .into_iter()
+                .map(|(key, tokens)| (key.to_owned(), tokens))
+                .collect()
+        };
+        Split {
+            models: owned(sorted_tokens(self.models)),
+            tools: sorted_tokens(self.tools),
+            projects: owned(sorted_tokens(self.projects)),
+            sessions: self.sessions.len() as u32,
+        }
+    }
+}
+
+/// Where an event's tokens were spent.
+struct Origin<'a> {
+    tool: Tool,
+    model: &'a str,
+    /// Project path without trailing `/`.
+    project: Option<&'a str>,
+    /// Top-level session id.
+    root: &'a str,
+}
+
+/// Usage and split of one breakdown row or day, while summing.
+#[derive(Default)]
+struct Acc<'a> {
+    usage: Usage,
+    split: SplitAcc<'a>,
+}
+
+impl<'a> Acc<'a> {
+    fn add(&mut self, at: &Origin<'a>, tokens: &Tokens, cost: f64, duration_ms: u32) {
+        self.usage.add(tokens, cost, duration_ms);
+        self.split.add(at, tokens.total());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Row {
     /// Stable model id or full project path, independent of the display label.
     pub key: String,
     pub label: String,
     pub usage: Usage,
+    pub split: Split,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolRow {
+    pub tool: Tool,
+    pub usage: Usage,
+    pub split: Split,
 }
 
 /// A session together with the subagent sessions it spawned.
@@ -121,10 +210,11 @@ pub struct SessionRow {
     pub id: String,
     pub title: String,
     pub project: Option<String>,
+    pub first_activity: i64,
     pub last_activity: i64,
     pub usage: Usage,
-    /// Models used, most tokens first.
-    pub models: Vec<String>,
+    /// Tokens per model, most first.
+    pub models: Vec<(String, u64)>,
     /// Subagent sessions with usage in the period.
     pub subagents: u32,
 }
@@ -133,6 +223,7 @@ pub struct SessionRow {
 pub struct DayRow {
     pub date: NaiveDate,
     pub usage: Usage,
+    pub split: Split,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -141,7 +232,7 @@ pub struct Summary {
     pub total: Usage,
     /// False when no price table is loaded; costs must be hidden.
     pub prices_available: bool,
-    pub by_tool: Vec<(Tool, Usage)>,
+    pub by_tool: Vec<ToolRow>,
     pub by_model: Vec<Row>,
     pub by_project: Vec<Row>,
     pub sessions: Vec<SessionRow>,
@@ -165,13 +256,14 @@ fn local_date(ts: i64) -> NaiveDate {
         .unwrap_or_default()
 }
 
-fn sorted_rows(map: HashMap<String, Usage>) -> Vec<Row> {
+fn sorted_rows(map: HashMap<&str, Acc>) -> Vec<Row> {
     let mut rows: Vec<Row> = map
         .into_iter()
-        .map(|(key, usage)| Row {
-            label: key.clone(),
-            key,
-            usage,
+        .map(|(key, acc)| Row {
+            key: key.to_owned(),
+            label: key.to_owned(),
+            usage: acc.usage,
+            split: acc.split.finish(),
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -195,9 +287,32 @@ pub fn project_label(project: &str) -> String {
         .to_owned()
 }
 
+/// Display labels for project paths: each path's basename, extended by the
+/// fewest parent components that tell it apart from the other paths.
+pub fn project_labels(paths: &[&str]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| {
+            // Grow the suffix until no other project has the same path components.
+            let mut suffix = *path;
+            for (index, _) in path.rmatch_indices('/') {
+                suffix = &path[index + 1..];
+                if !paths.iter().any(|other| {
+                    other != path && (*other == suffix || other.ends_with(&format!("/{suffix}")))
+                }) {
+                    break;
+                }
+                suffix = path;
+            }
+            suffix.to_owned()
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct Group<'a> {
     usage: Usage,
+    first_activity: i64,
     last_activity: i64,
     models: HashMap<&'a str, u64>,
     subagents: u32,
@@ -253,10 +368,10 @@ pub fn summarize<'a>(
         prices_available: !prices.is_empty(),
         ..Summary::default()
     };
-    let mut by_tool: HashMap<Tool, Usage> = HashMap::new();
-    let mut by_model: HashMap<String, Usage> = HashMap::new();
-    let mut by_project: HashMap<String, Usage> = HashMap::new();
-    let mut daily: HashMap<NaiveDate, Usage> = HashMap::new();
+    let mut by_tool: HashMap<Tool, Acc> = HashMap::new();
+    let mut by_model: HashMap<&str, Acc> = HashMap::new();
+    let mut by_project: HashMap<&str, Acc> = HashMap::new();
+    let mut daily: HashMap<NaiveDate, Acc> = HashMap::new();
     let mut unpriced: HashSet<String> = HashSet::new();
     let mut price_cache: HashMap<&str, Option<Price>> = HashMap::new();
     let mut recent_tokens = 0u64;
@@ -315,8 +430,14 @@ pub fn summarize<'a>(
 
     for (_, entry) in files {
         let session = &entry.session;
+        let root_id = root(entry.tool, &session.id);
+        let project = session
+            .project
+            .as_deref()
+            .map(|project| project.trim_end_matches('/'));
         let mut session_usage = Usage::default();
         let mut model_tokens: HashMap<&str, u64> = HashMap::new();
+        let mut first_activity = i64::MAX;
         let mut last_activity = i64::MIN;
         for event in &session.events {
             let (tokens, merged_duration) = match event.key.as_deref() {
@@ -342,10 +463,16 @@ pub fn summarize<'a>(
             let cost = price.map_or(0.0, |price| price.cost(&tokens, event.tier));
 
             let duration = merged_duration.unwrap_or(event.duration_ms);
+            let at = Origin {
+                tool: entry.tool,
+                model,
+                project,
+                root: root_id,
+            };
             daily
                 .entry(local_date(event.ts))
                 .or_default()
-                .add(&tokens, cost, duration);
+                .add(&at, &tokens, cost, duration);
             if now_ms - event.ts <= RATE_WINDOW_MS && event.ts <= now_ms {
                 recent_tokens = recent_tokens.saturating_add(tokens.total());
             }
@@ -359,20 +486,20 @@ pub fn summarize<'a>(
             by_tool
                 .entry(entry.tool)
                 .or_default()
-                .add(&tokens, cost, duration);
+                .add(&at, &tokens, cost, duration);
             by_model
-                .entry(model.to_owned())
+                .entry(model)
                 .or_default()
-                .add(&tokens, cost, duration);
-            if let Some(project) = &session.project {
+                .add(&at, &tokens, cost, duration);
+            if let Some(project) = project {
                 by_project
-                    .entry(project.trim_end_matches('/').to_owned())
+                    .entry(project)
                     .or_default()
-                    .add(&tokens, cost, duration);
+                    .add(&at, &tokens, cost, duration);
             }
             session_usage.add(&tokens, cost, duration);
-            let model_total = model_tokens.entry(model).or_default();
-            *model_total = model_total.saturating_add(tokens.total());
+            add_tokens(&mut model_tokens, model, tokens.total());
+            first_activity = first_activity.min(event.ts);
             last_activity = last_activity.max(event.ts);
         }
 
@@ -386,13 +513,17 @@ pub fn summarize<'a>(
         }
 
         if session_usage.requests > 0 {
-            let root_id = root(entry.tool, &session.id);
-            let group = groups.entry((entry.tool, root_id)).or_default();
+            let group = groups
+                .entry((entry.tool, root_id))
+                .or_insert_with(|| Group {
+                    first_activity: i64::MAX,
+                    ..Group::default()
+                });
             group.usage.merge(&session_usage);
+            group.first_activity = group.first_activity.min(first_activity);
             group.last_activity = group.last_activity.max(last_activity);
             for (model, tokens) in model_tokens {
-                let total = group.models.entry(model).or_default();
-                *total = total.saturating_add(tokens);
+                add_tokens(&mut group.models, model, tokens);
             }
             if root_id == session.id {
                 group.title = session.title.as_deref().or(session.prompt.as_deref());
@@ -421,51 +552,48 @@ pub fn summarize<'a>(
         let project = root
             .and_then(|root| root.project.as_deref())
             .or(group.project);
-        let mut models: Vec<(&str, u64)> = group.models.into_iter().collect();
-        models.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         summary.sessions.push(SessionRow {
             tool,
             id: id.to_owned(),
             title,
             project: project.map(str::to_owned),
+            first_activity: group.first_activity,
             last_activity: group.last_activity,
             usage: group.usage,
-            models: models
+            models: sorted_tokens(group.models)
                 .into_iter()
-                .map(|(model, _)| model.to_owned())
+                .map(|(model, tokens)| (model.to_owned(), tokens))
                 .collect(),
             subagents: group.subagents,
         });
     }
 
-    let mut tools: Vec<(Tool, Usage)> = by_tool.into_iter().collect();
+    let mut tools: Vec<ToolRow> = by_tool
+        .into_iter()
+        .map(|(tool, acc)| ToolRow {
+            tool,
+            usage: acc.usage,
+            split: acc.split.finish(),
+        })
+        .collect();
     tools.sort_by(|a, b| {
-        b.1.tokens
+        b.usage
+            .tokens
             .total()
-            .cmp(&a.1.tokens.total())
-            .then(a.0.cmp(&b.0))
+            .cmp(&a.usage.tokens.total())
+            .then(a.tool.cmp(&b.tool))
     });
     summary.by_tool = tools;
     summary.by_model = sorted_rows(by_model);
     summary.by_project = sorted_rows(by_project);
-    let paths: Vec<_> = summary
+    let paths: Vec<&str> = summary
         .by_project
         .iter()
-        .map(|row| row.key.clone())
+        .map(|row| row.key.as_str())
         .collect();
-    for row in &mut summary.by_project {
-        // Grow the suffix until no other project has the same path components.
-        let mut suffix = row.key.as_str();
-        for (index, _) in row.key.rmatch_indices('/') {
-            suffix = &row.key[index + 1..];
-            if !paths.iter().any(|other| {
-                other != &row.key && (other == suffix || other.ends_with(&format!("/{suffix}")))
-            }) {
-                break;
-            }
-            suffix = &row.key;
-        }
-        row.label = suffix.to_owned();
+    let labels = project_labels(&paths);
+    for (row, label) in summary.by_project.iter_mut().zip(labels) {
+        row.label = label;
     }
     summary.sessions.sort_by(|a, b| {
         b.last_activity
@@ -474,7 +602,11 @@ pub fn summarize<'a>(
     });
     let mut days: Vec<DayRow> = daily
         .into_iter()
-        .map(|(date, usage)| DayRow { date, usage })
+        .map(|(date, acc)| DayRow {
+            date,
+            usage: acc.usage,
+            split: acc.split.finish(),
+        })
         .collect();
     days.sort_by_key(|day| day.date);
     summary.streak_days = streak(&days, today);

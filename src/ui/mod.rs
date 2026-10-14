@@ -6,6 +6,7 @@
 //! widgets in memory.
 
 mod chart;
+mod detail;
 mod hyprland;
 mod layer;
 mod settings;
@@ -396,7 +397,9 @@ impl Shell {
                 Some(reserved) => 2 * settings.margin + reserved.top + reserved.bottom,
                 None => 2 * settings.margin,
             };
-            scrolled.set_max_content_height((monitor.geometry().height() - used).max(200));
+            let height = (monitor.geometry().height() - used).max(200);
+            scrolled.set_max_content_height(height);
+            widget.set_max_height(height);
         }
         window.set_child(Some(&scrolled));
 

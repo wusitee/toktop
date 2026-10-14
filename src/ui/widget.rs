@@ -3,9 +3,13 @@
 //!
 //! Every list has a fixed number of row slots built once; updates only
 //! change label text and visibility, so a live update never rebuilds
-//! widgets and stays cheap.
+//! widgets and stays cheap. The sessions list grows its slots the first time
+//! it is expanded.
+//!
+//! Rows and chart days open a [`Detail`] card when clicked.
 
 use super::chart::{self, Heatmap, Trend};
+use super::detail::{Detail, Selection};
 use chrono::{Days, Local};
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
@@ -24,6 +28,8 @@ const SWITCHER: [(Period, &str); 4] = [
     (Period::AllTime, "ALL"),
 ];
 const TREND_DAYS: u64 = 30;
+/// Most sessions listed when the sessions section is expanded.
+const MAX_SESSIONS: usize = 100;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Breakdown {
@@ -32,7 +38,7 @@ enum Breakdown {
     Tools,
 }
 
-fn label(classes: &[&str]) -> gtk::Label {
+pub(super) fn label(classes: &[&str]) -> gtk::Label {
     let label = gtk::Label::builder().xalign(0.0).build();
     for class in classes {
         label.add_css_class(class);
@@ -41,7 +47,7 @@ fn label(classes: &[&str]) -> gtk::Label {
 }
 
 /// A label that shrinks with an ellipsis instead of widening the card.
-fn ellipsized(classes: &[&str]) -> gtk::Label {
+pub(super) fn ellipsized(classes: &[&str]) -> gtk::Label {
     let label = label(classes);
     label.set_ellipsize(gtk::pango::EllipsizeMode::End);
     label.set_hexpand(true);
@@ -50,28 +56,28 @@ fn ellipsized(classes: &[&str]) -> gtk::Label {
     label
 }
 
-fn hbox(spacing: i32) -> gtk::Box {
+pub(super) fn hbox(spacing: i32) -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Horizontal, spacing)
 }
 
-fn vbox(spacing: i32) -> gtk::Box {
+pub(super) fn vbox(spacing: i32) -> gtk::Box {
     gtk::Box::new(gtk::Orientation::Vertical, spacing)
 }
 
 /// Small colored mark for a model vendor or tool.
-fn dot() -> gtk::Box {
+pub(super) fn dot() -> gtk::Box {
     gtk::Box::builder()
         .css_classes(["dot"])
         .valign(gtk::Align::Center)
         .build()
 }
 
-fn set_family(dot: &gtk::Box, family: &str) {
+pub(super) fn set_family(dot: &gtk::Box, family: &str) {
     dot.set_css_classes(&["dot", family]);
 }
 
 /// Style class for a model id, by vendor.
-fn model_family(model: &str) -> &'static str {
+pub(super) fn model_family(model: &str) -> &'static str {
     let model = model.to_ascii_lowercase();
     let name = model.rsplit('/').next().unwrap_or(&model);
     if name.contains("claude") {
@@ -93,7 +99,7 @@ fn model_family(model: &str) -> &'static str {
     }
 }
 
-fn tool_family(tool: Tool) -> &'static str {
+pub(super) fn tool_family(tool: Tool) -> &'static str {
     match tool {
         Tool::ClaudeCode => "claude",
         Tool::Codex => "openai",
@@ -103,13 +109,16 @@ fn tool_family(tool: Tool) -> &'static str {
     }
 }
 
-fn section(title: &str) -> gtk::Label {
+pub(super) fn section(title: &str) -> gtk::Label {
     let label = label(&["section-title"]);
     label.set_label(title);
     label
 }
 
-fn section_header(title: &impl IsA<gtk::Widget>, trailing: &impl IsA<gtk::Widget>) -> gtk::Box {
+pub(super) fn section_header(
+    title: &impl IsA<gtk::Widget>,
+    trailing: &impl IsA<gtk::Widget>,
+) -> gtk::Box {
     let header = hbox(8);
     header.add_css_class("section-header");
     title.set_hexpand(true);
@@ -120,55 +129,16 @@ fn section_header(title: &impl IsA<gtk::Widget>, trailing: &impl IsA<gtk::Widget
     header
 }
 
-fn separator() -> gtk::Separator {
+pub(super) fn separator() -> gtk::Separator {
     gtk::Separator::new(gtk::Orientation::Horizontal)
 }
 
-fn display_cost(cost: f64, available: bool) -> String {
+pub(super) fn display_cost(cost: f64, available: bool) -> String {
     if available {
         format::cost(cost)
     } else {
         "—".to_owned()
     }
-}
-
-/// Multi-line usage details for a tooltip.
-fn usage_tooltip(title: &str, usage: &Usage, prices_available: bool) -> String {
-    let tokens = &usage.tokens;
-    let mut lines = vec![
-        title.to_owned(),
-        format!(
-            "{} tokens · {} · {} requests",
-            format::grouped(tokens.total()),
-            display_cost(usage.cost, prices_available),
-            format::grouped(usage.requests)
-        ),
-    ];
-    let parts: Vec<String> = [
-        ("Input", tokens.input),
-        ("Output", tokens.output),
-        ("Reasoning", tokens.reasoning),
-        ("Cache read", tokens.cache_read),
-        ("Cache write", tokens.cache_write),
-    ]
-    .iter()
-    .filter(|(_, value)| *value > 0)
-    .map(|(name, value)| format!("{name} {}", format::tokens(*value)))
-    .collect();
-    if !parts.is_empty() {
-        lines.push(parts.join(" · "));
-    }
-    let mut extra = Vec::new();
-    if let Some(rate) = tokens.cache_hit_rate() {
-        extra.push(format!("{} cache hits", format::percent(rate)));
-    }
-    if let Some(speed) = usage.speed() {
-        extra.push(format::speed(speed));
-    }
-    if !extra.is_empty() {
-        lines.push(extra.join(" · "));
-    }
-    lines.join("\n")
 }
 
 /// A small captioned statistic.
@@ -335,7 +305,7 @@ impl SessionSlot {
         }
     }
 
-    fn set(&self, session: &SessionRow, now_ms: i64, prices_available: bool) {
+    fn set(&self, session: &SessionRow, now_ms: i64) {
         set_family(&self.dot, tool_family(session.tool));
         self.title.set_label(&session.title);
         self.tokens
@@ -343,7 +313,7 @@ impl SessionSlot {
         let mut detail = Vec::new();
         match session.models.as_slice() {
             [] => {}
-            [model] => detail.push(model.clone()),
+            [(model, _)] => detail.push(model.clone()),
             models => detail.push(format!("{} models", models.len())),
         }
         match session.subagents {
@@ -353,16 +323,6 @@ impl SessionSlot {
         }
         detail.push(format::ago(session.last_activity, now_ms));
         self.detail.set_label(&detail.join(" · "));
-        let mut tooltip = usage_tooltip(&session.title, &session.usage, prices_available);
-        if let Some(project) = &session.project {
-            tooltip.push('\n');
-            tooltip.push_str(project);
-        }
-        if session.models.len() > 1 {
-            tooltip.push('\n');
-            tooltip.push_str(&session.models.join(", "));
-        }
-        self.root.set_tooltip_text(Some(&tooltip));
     }
 }
 
@@ -387,9 +347,15 @@ pub struct Widget {
     breakdown_tabs: Vec<(Breakdown, gtk::ToggleButton)>,
     rows: Vec<BreakdownSlot>,
     rows_empty: gtk::Label,
-    sessions: Vec<SessionSlot>,
+    /// Sessions listed while collapsed.
+    session_limit: usize,
+    sessions: RefCell<Vec<SessionSlot>>,
+    sessions_list: gtk::Box,
+    sessions_scroll: gtk::ScrolledWindow,
+    sessions_more: gtk::ToggleButton,
     sessions_empty: gtk::Label,
     sessions_count: gtk::Label,
+    detail_card: Detail,
     heatmap: Heatmap,
     active_days: gtk::Label,
     trend: Trend,
@@ -539,12 +505,27 @@ impl Widget {
         let sessions_box = vbox(0);
         sessions_box.add_css_class("section");
         let sessions_count = label(&["caption"]);
-        sessions_box.append(&section_header(&section("SESSIONS"), &sessions_count));
-        let session_slots: Vec<SessionSlot> = (0..sessions).map(|_| SessionSlot::new()).collect();
-        for slot in &session_slots {
-            slot.root.set_visible(false);
-            sessions_box.append(&slot.root);
-        }
+        let sessions_more = gtk::ToggleButton::builder()
+            .icon_name("pan-down-symbolic")
+            .tooltip_text("Show more sessions")
+            .css_classes(["icon"])
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        let sessions_trailing = hbox(4);
+        sessions_trailing.append(&sessions_count);
+        sessions_trailing.append(&sessions_more);
+        sessions_box.append(&section_header(&section("SESSIONS"), &sessions_trailing));
+        // Expanded, the list scrolls within one row more than it shows
+        // collapsed.
+        let sessions_list = vbox(0);
+        let sessions_scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .child(&sessions_list)
+            .build();
+        sessions_box.append(&sessions_scroll);
         let sessions_empty = label(&["dim", "empty"]);
         sessions_empty.set_label("No sessions in this period");
         sessions_empty.set_visible(false);
@@ -575,7 +556,9 @@ impl Widget {
         trend_box.set_visible(sections.trend);
         root.append(&trend_box);
 
+        let detail_card = Detail::new(&root, settings.anchor, settings.width);
         let widget = Rc::new(Widget {
+            detail_card,
             root,
             period_buttons,
             live,
@@ -596,7 +579,11 @@ impl Widget {
             breakdown_tabs,
             rows,
             rows_empty,
-            sessions: session_slots,
+            session_limit: sessions,
+            sessions: RefCell::default(),
+            sessions_list,
+            sessions_scroll,
+            sessions_more,
             sessions_empty,
             sessions_count,
             heatmap,
@@ -606,6 +593,16 @@ impl Widget {
             last: RefCell::default(),
         });
         widget.select_period(selected);
+        for _ in 0..sessions {
+            widget.add_session_slot();
+        }
+        widget.connect_details();
+        let weak = Rc::downgrade(&widget);
+        widget.sessions_more.connect_toggled(move |button| {
+            if let Some(widget) = weak.upgrade() {
+                widget.set_expanded(button.is_active());
+            }
+        });
         for (kind, button) in &widget.breakdown_tabs {
             let kind = *kind;
             let weak = Rc::downgrade(&widget);
@@ -620,6 +617,154 @@ impl Widget {
             });
         }
         widget
+    }
+
+    /// Caps the detail card's height, like the card's own.
+    pub fn set_max_height(&self, height: i32) {
+        self.detail_card.set_max_height(height);
+    }
+
+    /// Opens detail cards from breakdown rows and chart days.
+    fn connect_details(self: &Rc<Self>) {
+        for (index, slot) in self.rows.iter().enumerate() {
+            self.clickable(&slot.root, false, move |widget, summary, _, _| match widget
+                .breakdown
+                .get()
+            {
+                Breakdown::Models => summary
+                    .by_model
+                    .get(index)
+                    .map(|row| Selection::Model(row.key.clone())),
+                Breakdown::Projects => summary
+                    .by_project
+                    .get(index)
+                    .map(|row| Selection::Project(row.key.clone())),
+                Breakdown::Tools => summary
+                    .by_tool
+                    .get(index)
+                    .map(|row| Selection::Tool(row.tool)),
+            });
+        }
+        self.clickable(&self.heatmap.area, true, |widget, _, x, y| {
+            widget.heatmap.date_at(x, y).map(Selection::Day)
+        });
+        self.clickable(&self.trend.area, false, |widget, _, x, _| {
+            widget.trend.date_at(x).map(Selection::Day)
+        });
+    }
+
+    /// Makes `target` open the detail card for what `pick` finds under the
+    /// pointer. The item is picked when the button goes down, so a live
+    /// update that reorders rows before the release cannot change it.
+    /// `at_point` aligns the card with the click instead of all of `target`.
+    fn clickable(
+        self: &Rc<Self>,
+        target: &impl IsA<gtk::Widget>,
+        at_point: bool,
+        pick: impl Fn(&Widget, &Summary, f64, f64) -> Option<Selection> + 'static,
+    ) {
+        target.add_css_class("clickable");
+        target.set_cursor_from_name(Some("pointer"));
+        let click = gtk::GestureClick::builder()
+            .button(gtk::gdk::BUTTON_PRIMARY)
+            .build();
+        // The handlers must not hold `target`: it owns the controller.
+        let picked: Rc<RefCell<Option<(Selection, f64)>>> = Rc::default();
+        let weak = Rc::downgrade(self);
+        let state = picked.clone();
+        click.connect_pressed(move |_, _, x, y| {
+            let selection = weak.upgrade().and_then(|widget| {
+                let summary = widget.last.borrow().clone()?;
+                pick(&widget, &summary, x, y)
+            });
+            state.replace(selection.map(|selection| (selection, y)));
+        });
+        let state = picked.clone();
+        click.connect_cancel(move |_, _| {
+            state.take();
+        });
+        let weak = Rc::downgrade(self);
+        click.connect_released(move |gesture, _, x, y_released| {
+            let Some((selection, y)) = picked.take() else {
+                return;
+            };
+            let (Some(widget), Some(source)) = (weak.upgrade(), gesture.widget()) else {
+                return;
+            };
+            // Dragging off the item before releasing cancels the click.
+            if !source.contains(x, y_released) {
+                return;
+            }
+            let summary = widget.last.borrow().clone();
+            if let Some(summary) = summary {
+                widget.show_detail(selection, &source, at_point.then_some(y), &summary);
+            }
+        });
+        target.add_controller(click);
+    }
+
+    /// Opens the detail card level with `source`, or with the point `y` in
+    /// it.
+    fn show_detail(
+        &self,
+        selection: Selection,
+        source: &impl IsA<gtk::Widget>,
+        y: Option<f64>,
+        summary: &Summary,
+    ) {
+        let Some(bounds) = source.compute_bounds(&self.root) else {
+            return;
+        };
+        let (top, height) = match y {
+            Some(y) => (bounds.y() as f64 + y, 1.0),
+            None => (bounds.y() as f64, bounds.height() as f64),
+        };
+        self.detail_card.show(selection, top, height, summary);
+    }
+
+    fn add_session_slot(self: &Rc<Self>) {
+        let mut slots = self.sessions.borrow_mut();
+        let index = slots.len();
+        let slot = SessionSlot::new();
+        slot.root.set_visible(false);
+        self.sessions_list.append(&slot.root);
+        self.clickable(&slot.root, false, move |_, summary, _, _| {
+            let session = summary.sessions.get(index)?;
+            Some(Selection::Session(session.tool, session.id.clone()))
+        });
+        slots.push(slot);
+    }
+
+    fn set_expanded(self: &Rc<Self>, expanded: bool) {
+        self.sessions_more.set_icon_name(if expanded {
+            "pan-up-symbolic"
+        } else {
+            "pan-down-symbolic"
+        });
+        self.sessions_more.set_tooltip_text(Some(if expanded {
+            "Show fewer sessions"
+        } else {
+            "Show more sessions"
+        }));
+        if expanded {
+            // Rows are one line each, so all have the first one's height.
+            let row = self.sessions.borrow().first().map_or(0, |slot| {
+                slot.root.measure(gtk::Orientation::Vertical, -1).1
+            });
+            self.sessions_scroll
+                .set_max_content_height(row * (self.session_limit as i32 + 1));
+            self.sessions_scroll
+                .set_vscrollbar_policy(gtk::PolicyType::Automatic);
+        } else {
+            self.sessions_scroll
+                .set_vscrollbar_policy(gtk::PolicyType::Never);
+            self.sessions_scroll.set_max_content_height(-1);
+            self.sessions_scroll.vadjustment().set_value(0.0);
+        }
+        let last = self.last.borrow().clone();
+        if let Some(summary) = last {
+            self.update_sessions(&summary, toktop::now_ms());
+        }
     }
 
     pub fn select_period(&self, period: Period) {
@@ -638,7 +783,7 @@ impl Widget {
         }
     }
 
-    pub fn update(&self, summary: &Rc<Summary>) {
+    pub fn update(self: &Rc<Self>, summary: &Rc<Summary>) {
         self.last.replace(Some(summary.clone()));
         let now = toktop::now_ms();
         let total = &summary.total;
@@ -712,6 +857,7 @@ impl Widget {
         }
         self.update_sessions(summary, now);
         self.update_charts(summary);
+        self.detail_card.refresh(summary);
     }
 
     fn update_limits(&self, summary: &Summary, now_ms: i64) {
@@ -737,7 +883,6 @@ impl Widget {
     }
 
     fn update_breakdown(&self, summary: &Summary) {
-        let available = summary.prices_available;
         let total = summary.total.tokens.total().max(1) as f64;
         let items: Vec<(&str, &str, &Usage)> = match self.breakdown.get() {
             Breakdown::Models => summary
@@ -753,10 +898,9 @@ impl Widget {
             Breakdown::Tools => summary
                 .by_tool
                 .iter()
-                .map(|(tool, usage)| (tool_family(*tool), tool.label(), usage))
+                .map(|row| (tool_family(row.tool), row.tool.label(), &row.usage))
                 .collect(),
         };
-        let projects = self.breakdown.get() == Breakdown::Projects;
         for (index, slot) in self.rows.iter().enumerate() {
             let Some((family, name, usage)) = items.get(index) else {
                 slot.root.set_visible(false);
@@ -770,32 +914,34 @@ impl Widget {
             slot.tokens.set_label(&format::tokens(usage.tokens.total()));
             slot.share
                 .set_label(&format::percent(usage.tokens.total() as f64 / total));
-            let mut tooltip = usage_tooltip(name, usage, available);
-            if projects {
-                // The label may be shortened; the tooltip has the full path.
-                if let Some(row) = summary.by_project.get(index) {
-                    tooltip.push('\n');
-                    tooltip.push_str(&row.key);
-                }
-            }
-            slot.root.set_tooltip_text(Some(&tooltip));
         }
         self.rows_empty.set_visible(items.is_empty());
     }
 
-    fn update_sessions(&self, summary: &Summary, now_ms: i64) {
-        if self.sessions.is_empty() {
+    fn update_sessions(self: &Rc<Self>, summary: &Summary, now_ms: i64) {
+        if self.session_limit == 0 {
             return;
         }
-        for (index, slot) in self.sessions.iter().enumerate() {
-            match summary.sessions.get(index) {
+        let shown = if self.sessions_more.is_active() {
+            summary.sessions.len().min(MAX_SESSIONS)
+        } else {
+            summary.sessions.len().min(self.session_limit)
+        };
+        while self.sessions.borrow().len() < shown {
+            self.add_session_slot();
+        }
+        for (index, slot) in self.sessions.borrow().iter().enumerate() {
+            match summary.sessions.get(index).filter(|_| index < shown) {
                 Some(session) => {
                     slot.root.set_visible(true);
-                    slot.set(session, now_ms, summary.prices_available);
+                    slot.set(session, now_ms);
                 }
                 None => slot.root.set_visible(false),
             }
         }
+        self.sessions_more.set_visible(
+            self.sessions_more.is_active() || summary.sessions.len() > self.session_limit,
+        );
         self.sessions_empty.set_visible(summary.sessions.is_empty());
         self.sessions_count
             .set_label(&match summary.sessions.len() {
