@@ -6,7 +6,9 @@
 //! widgets in memory.
 
 mod chart;
+mod hyprland;
 mod layer;
+mod settings;
 mod tray;
 mod widget;
 
@@ -27,11 +29,14 @@ pub struct Options {
     pub background: bool,
     /// Show or hide the widget of a running instance.
     pub toggle: bool,
+    /// Open the settings window.
+    pub settings: bool,
 }
 
 pub fn run(options: Options) -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
-    let (background, toggle) = (options.background, options.toggle);
+    let (background, toggle, open_settings) =
+        (options.background, options.toggle, options.settings);
     let shell = Rc::new(Shell::new(&app, options));
     // `register` emits `startup` on the primary instance.
     let started = shell.clone();
@@ -44,6 +49,8 @@ pub fn run(options: Options) -> glib::ExitCode {
         // Another instance is running: forward the request to it.
         if toggle {
             app.activate_action("toggle", None);
+        } else if open_settings {
+            app.activate_action("settings", None);
         } else if !background {
             app.activate();
         }
@@ -78,7 +85,15 @@ pub fn run(options: Options) -> glib::ExitCode {
             }
         })
         .build();
-    app.add_action_entries([quit, toggle_action, refresh]);
+    let weak = Rc::downgrade(&shell);
+    let settings_action = gio::ActionEntry::builder("settings")
+        .activate(move |_: &adw::Application, _, _| {
+            if let Some(shell) = weak.upgrade() {
+                shell.open_settings();
+            }
+        })
+        .build();
+    app.add_action_entries([quit, toggle_action, refresh, settings_action]);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
     app.set_accels_for_action("window.close", &["<Control>w"]);
     // Command-line arguments are handled before GTK starts.
@@ -131,6 +146,7 @@ struct Shell {
     worker: RefCell<Option<Sender<Msg>>>,
     latest: RefCell<Option<Rc<Summary>>>,
     ui: RefCell<Option<Ui>>,
+    settings: RefCell<Option<adw::Window>>,
     tray: RefCell<Option<tray::Tray>>,
     /// Keeps the application running while the widget is hidden.
     hold: RefCell<Option<gio::ApplicationHoldGuard>>,
@@ -171,6 +187,7 @@ impl Shell {
             worker: RefCell::default(),
             latest: RefCell::default(),
             ui: RefCell::default(),
+            settings: RefCell::default(),
             tray: RefCell::default(),
             hold: RefCell::default(),
             activated: Cell::new(false),
@@ -228,9 +245,15 @@ impl Shell {
         if want_tray {
             self.start_tray(period);
         }
-        // A hidden layer widget is summoned again with `toktop --toggle`.
-        if self.layered.get() || self.tray.borrow().is_some() {
-            self.hold.replace(Some(self.app.hold()));
+        self.update_hold();
+    }
+
+    /// Keeps toktop running while a hidden widget can be summoned again:
+    /// a layer widget with `toktop --toggle`, any widget from the tray.
+    fn update_hold(&self) {
+        let needed = self.layered.get() || self.tray.borrow().is_some();
+        if needed != self.hold.borrow().is_some() {
+            self.hold.replace(needed.then(|| self.app.hold()));
         }
     }
 
@@ -259,6 +282,7 @@ impl Shell {
                     tray::Command::Show => shell.show_window(),
                     tray::Command::Period(period) => shell.set_period(period),
                     tray::Command::RefreshPrices => shell.send(Msg::RefreshPrices),
+                    tray::Command::Settings => shell.open_settings(),
                     tray::Command::Quit => shell.app.quit(),
                 }
             }
@@ -267,10 +291,14 @@ impl Shell {
 
     fn activate(self: &Rc<Self>) {
         let first = !self.activated.replace(true);
-        if first && self.options.background {
+        if first && self.options.settings {
+            self.open_settings();
+        }
+        if first && (self.options.background || self.options.settings) {
             let desktop = self.layered.get() && self.config.borrow().widget.layer.is_desktop();
             if !desktop {
-                if self.hold.borrow().is_some() {
+                // The settings window keeps toktop running.
+                if self.hold.borrow().is_some() || self.options.settings {
                     return;
                 }
                 eprintln!("toktop: no tray icon available; opening the window");
@@ -313,17 +341,11 @@ impl Shell {
         let config = self.config.borrow().clone();
         let settings = &config.widget;
         let shell = Rc::downgrade(self);
-        let widget = widget::Widget::new(
-            config.period,
-            settings.width,
-            settings.rows,
-            settings.sessions,
-            move |period| {
-                if let Some(shell) = shell.upgrade() {
-                    shell.set_period(period);
-                }
-            },
-        );
+        let widget = widget::Widget::new(config.period, settings, move |period| {
+            if let Some(shell) = shell.upgrade() {
+                shell.set_period(period);
+            }
+        });
 
         let window = gtk::ApplicationWindow::builder()
             .application(&self.app)
@@ -335,6 +357,11 @@ impl Shell {
         let configured = layer::find_monitor(&settings.output);
         if layered {
             layer::place(&window, settings, configured.as_ref());
+            // Hyprland focuses an on-demand layer when it maps; keep the
+            // focus in an open settings window.
+            if self.settings.borrow().is_some() {
+                layer::set_keyboard(&window, false);
+            }
         } else {
             window.add_css_class("windowed");
         }
@@ -346,21 +373,36 @@ impl Shell {
             .propagate_natural_width(true)
             .child(&widget.root)
             .build();
-        let monitor = configured.or_else(|| {
-            gdk::Display::default()?
-                .monitors()
-                .item(0)?
-                .downcast::<gdk::Monitor>()
-                .ok()
-        });
+        // Panels reserve space the widget must not grow under; only
+        // Hyprland reports it.
+        // Hyprland's focused monitor is where an unplaced widget appears,
+        // also when the configured one is disconnected.
+        let output = configured.as_ref().and_then(|monitor| monitor.connector());
+        let reserved = layered
+            .then(|| hyprland::reserved(output.as_deref()))
+            .flatten();
+        let monitor = configured
+            .or_else(|| layer::find_monitor(&reserved.as_ref()?.connector))
+            .or_else(|| {
+                gdk::Display::default()?
+                    .monitors()
+                    .item(0)?
+                    .downcast::<gdk::Monitor>()
+                    .ok()
+            });
         if let Some(monitor) = monitor {
-            let margin = if layered { 2 * settings.margin } else { 96 };
-            scrolled.set_max_content_height((monitor.geometry().height() - margin).max(200));
+            let used = match &reserved {
+                _ if !layered => 96,
+                Some(reserved) => 2 * settings.margin + reserved.top + reserved.bottom,
+                None => 2 * settings.margin,
+            };
+            scrolled.set_max_content_height((monitor.geometry().height() - used).max(200));
         }
         window.set_child(Some(&scrolled));
 
         // Right-click menu.
         let model = gio::Menu::new();
+        model.append(Some("Settings"), Some("app.settings"));
         model.append(Some("Refresh prices"), Some("app.refresh-prices"));
         model.append(Some("Hide"), Some("app.toggle"));
         model.append(Some("Quit"), Some("app.quit"));
@@ -438,15 +480,69 @@ impl Shell {
         }
     }
 
-    fn update_config(&self, change: impl FnOnce(&mut Config)) {
+    /// Applies `change` and saves it. Returns the settings from before.
+    fn update_config(&self, change: impl FnOnce(&mut Config)) -> Config {
         let mut config = self.config.borrow_mut();
         let before = config.clone();
         change(&mut config);
-        if *config == before || !self.config_writable {
+        if *config != before
+            && self.config_writable
+            && let Err(error) = config.save(&config::path())
+        {
+            eprintln!("toktop: could not save settings: {error}");
+        }
+        before
+    }
+
+    fn open_settings(self: &Rc<Self>) {
+        if let Some(window) = self.settings.borrow().as_ref() {
+            window.present();
             return;
         }
-        if let Err(error) = config.save(&config::path()) {
-            eprintln!("toktop: could not save settings: {error}");
+        let shell = Rc::downgrade(self);
+        let change: settings::Change = Rc::new(move |edit| {
+            if let Some(shell) = shell.upgrade() {
+                shell.apply_settings(edit);
+            }
+        });
+        let window = settings::window(&self.app, &self.config.borrow(), change);
+        let shell = Rc::downgrade(self);
+        window.connect_close_request(move |_| {
+            if let Some(shell) = shell.upgrade() {
+                shell.settings.replace(None);
+                if let (Some(ui), true) = (shell.ui.borrow().as_ref(), shell.layered.get()) {
+                    layer::set_keyboard(&ui.window, true);
+                }
+            }
+            glib::Propagation::Proceed
+        });
+        window.present();
+        self.settings.replace(Some(window));
+    }
+
+    /// Applies an edit from the settings window right away.
+    fn apply_settings(self: &Rc<Self>, edit: &dyn Fn(&mut Config)) {
+        let before = self.update_config(edit);
+        let config = self.config.borrow().clone();
+        if config.tools != before.tools {
+            self.send(Msg::Tools(config.tools.clone()));
+        }
+        if config.widget == before.widget {
+            return;
+        }
+        let layered = config.widget.layer != Layer::Window && layer::is_supported();
+        self.layered.set(layered);
+        self.update_hold();
+        // Rebuild an open widget with the new settings. A layer widget does
+        // not take the focus while settings are open (see `build_window`);
+        // an ordinary window is presented first, then settings over it.
+        let open = self.ui.borrow().as_ref().map(|ui| ui.window.clone());
+        if let Some(window) = open {
+            window.close();
+            self.show_window();
+            if !layered && let Some(settings) = self.settings.borrow().as_ref() {
+                settings.present();
+            }
         }
     }
 }

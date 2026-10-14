@@ -4,7 +4,9 @@ use toktop::aggregate::{self, Period};
 use toktop::{format, store::Store};
 
 fn usage() -> ! {
-    eprintln!("usage: toktop [--background | --toggle | --print [today|week|7d|month|30d|all]]");
+    eprintln!(
+        "usage: toktop [--background | --toggle | --settings | --print [today|week|7d|month|30d|all]]"
+    );
     std::process::exit(2);
 }
 
@@ -28,10 +30,11 @@ fn main() -> std::process::ExitCode {
     limit_malloc_arenas();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
-        None | Some("--background" | "--toggle") if args.len() <= 1 => {
+        None | Some("--background" | "--toggle" | "--settings") if args.len() <= 1 => {
             let options = ui::Options {
                 background: args.first().is_some_and(|arg| arg == "--background"),
                 toggle: args.first().is_some_and(|arg| arg == "--toggle"),
+                settings: args.first().is_some_and(|arg| arg == "--settings"),
             };
             if ui::run(options) == gtk::glib::ExitCode::SUCCESS {
                 std::process::ExitCode::SUCCESS

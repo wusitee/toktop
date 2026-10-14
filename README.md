@@ -31,10 +31,10 @@ Run `toktop` to show the widget. On Hyprland, Sway, KDE Plasma and other composi
 - total tokens, cost and requests for the selected period (DAY, WEEK, MONTH, ALL)
 - average output speed (tok/s), live tokens per minute, cache hit rate and daily streak
 - Codex rate limits left and their reset times
-- top models, projects or tools, and recent sessions with their models and subagents
+- top models, projects or tools with their speed, and recent sessions with their models and subagents
 - an activity heatmap and a 30-day trend
 
-Hover a row for its full breakdown, right-click for Refresh prices, Hide and Quit. Layer, position, monitor and size are configurable, and the look can be changed with a `style.css`; see [docs/configuration.md](docs/configuration.md).
+Hover a row for its full breakdown, right-click for Settings, Refresh prices, Hide and Quit. The settings window (also `toktop --settings`) turns tools on or off, chooses which parts of the card are shown, and sets layer, position, monitor and size. The look can be changed with a `style.css`; see [docs/configuration.md](docs/configuration.md).
 
 On Hyprland:
 
@@ -44,7 +44,7 @@ bind = SUPER, T, exec, toktop --toggle
 layerrule = blur on, ignore_alpha 0.5, match:namespace toktop
 ```
 
-With a panel that hosts tray icons (waybar, KDE Plasma, GNOME with the AppIndicator extension), toktop also shows a tray icon: click it to show or hide the widget, or use its menu to change the period or quit. To start at login on other desktops:
+With a panel that hosts tray icons (waybar, KDE Plasma, GNOME with the AppIndicator extension), toktop also shows a tray icon: click it to show or hide the widget, or use its menu to change the period, open settings or quit. To start at login on other desktops:
 
 ```sh
 install -Dm644 data/io.github.wusitee.toktop-autostart.desktop ~/.config/autostart/io.github.wusitee.toktop.desktop

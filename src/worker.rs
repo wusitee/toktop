@@ -15,11 +15,15 @@ use std::time::{Duration, Instant};
 pub enum Msg {
     Changed(Vec<PathBuf>),
     Rescan,
-    WatchCoverage(bool),
+    /// Watcher generation and whether it covers every directory.
+    WatchCoverage(u32, bool),
     Period(Period),
     Prices(PriceTable),
     /// Download prices now instead of waiting for the daily refresh.
     RefreshPrices,
+    /// Read only these tools from now on. Data of other tools is dropped
+    /// and their directories are no longer watched or scanned.
+    Tools(Vec<Tool>),
 }
 
 /// Quiet time after a change before it is applied.
@@ -87,26 +91,9 @@ impl<E: FnMut(Summary)> State<E> {
     }
 
     fn run(mut self, rx: mpsc::Receiver<Msg>, tx: Sender<Msg>) {
-        let tools = self.store.tools.clone();
-        let mut roots: Vec<PathBuf> = tools
-            .iter()
-            .copied()
-            .flat_map(paths::source_roots)
-            .collect();
-        roots.sort();
-        roots.dedup();
-        let watch_tx = tx.clone();
         // Watch before scanning so writes during the scan are queued.
-        let watcher = watch::spawn(roots, paths::title_sources(&tools), move |change| {
-            let _ = watch_tx.send(match change {
-                watch::Change::Paths(paths) => Msg::Changed(paths),
-                watch::Change::Rescan => Msg::Rescan,
-                watch::Change::Coverage(complete) => Msg::WatchCoverage(complete),
-            });
-        });
-        if let Err(error) = &watcher {
-            eprintln!("toktop: file watching unavailable ({error}); polling every {POLL:?}");
-        }
+        let mut generation = 0;
+        let mut watcher = start_watch(&self.store.tools, &tx, generation);
         // Coverage is reported by the watcher after registration.
         let mut watching = false;
         let (prices, stale) = crate::cached_prices();
@@ -162,7 +149,9 @@ impl<E: FnMut(Summary)> State<E> {
                     last_change = Instant::now();
                     first_change.get_or_insert(last_change);
                 }
-                Ok(Msg::WatchCoverage(complete)) => watching = complete,
+                Ok(Msg::WatchCoverage(from, complete)) if from == generation => watching = complete,
+                // Reported by a replaced watcher.
+                Ok(Msg::WatchCoverage(..)) => {}
                 Ok(Msg::Period(period)) => {
                     self.period = period;
                     self.publish(false);
@@ -174,6 +163,21 @@ impl<E: FnMut(Summary)> State<E> {
                     trim_heap();
                 }
                 Ok(Msg::RefreshPrices) => next_price_fetch = Some(Instant::now()),
+                Ok(Msg::Tools(tools)) if tools != self.store.tools => {
+                    // Stop the old watcher before its changes can be queued.
+                    drop(watcher);
+                    generation += 1;
+                    watcher = start_watch(&tools, &tx, generation);
+                    watching = false;
+                    pending.clear();
+                    rescan = false;
+                    first_change = None;
+                    self.store = Store::with_tools(tools);
+                    self.store.sync_all();
+                    self.publish(false);
+                    trim_heap();
+                }
+                Ok(Msg::Tools(_)) => {}
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -211,6 +215,30 @@ impl<E: FnMut(Summary)> State<E> {
             }
         }
     }
+}
+
+/// Watches the source roots and title indexes of `tools`, forwarding
+/// changes to the worker. Coverage reports carry `generation`.
+fn start_watch(tools: &[Tool], tx: &Sender<Msg>, generation: u32) -> io::Result<watch::Handle> {
+    let mut roots: Vec<PathBuf> = tools
+        .iter()
+        .copied()
+        .flat_map(paths::source_roots)
+        .collect();
+    roots.sort();
+    roots.dedup();
+    let tx = tx.clone();
+    let watcher = watch::spawn(roots, paths::title_sources(tools), move |change| {
+        let _ = tx.send(match change {
+            watch::Change::Paths(paths) => Msg::Changed(paths),
+            watch::Change::Rescan => Msg::Rescan,
+            watch::Change::Coverage(complete) => Msg::WatchCoverage(generation, complete),
+        });
+    });
+    if let Err(error) = &watcher {
+        eprintln!("toktop: file watching unavailable ({error}); polling every {POLL:?}");
+    }
+    watcher
 }
 
 #[cfg(test)]

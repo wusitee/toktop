@@ -1,6 +1,8 @@
 # Configuration
 
-Settings live in `$XDG_CONFIG_HOME/toktop/config.toml` (default `~/.config/toktop/config.toml`). The file is optional: missing keys use their defaults, and toktop creates the file the first time a setting changes in the app. A file that cannot be parsed is reported on stderr and ignored for the session; toktop never overwrites it.
+Settings live in `$XDG_CONFIG_HOME/toktop/config.toml` (default `~/.config/toktop/config.toml`). The file is optional: missing keys use their defaults, and toktop creates the file the first time a setting changes in the app.
+
+Most settings can also be changed in the settings window: right-click the widget and choose Settings, use the tray menu, or run `toktop --settings`. Changes there apply immediately, except `tray`. A file that cannot be parsed is reported on stderr and ignored for the session; toktop never overwrites it.
 
 ```toml
 period = "today"                               # today, week, 7d, month, 30d or all
@@ -15,13 +17,21 @@ output = ""           # monitor connector such as "DP-1"; empty lets the composi
 width = 380
 rows = 5
 sessions = 5
+
+[widget.sections]     # parts of the card that are shown
+stats = true          # speed, live rate, cache and streak tiles
+limits = true         # Codex rate limits
+breakdown = true      # models, projects and tools
+sessions = true
+activity = true       # heatmap
+trend = true
 ```
 
 | Key | Default | Meaning |
 |---|---|---|
 | `period` | `"today"` | Period shown at startup. Changing the period in the widget or the tray menu saves it. |
 | `tray` | `true` | Register a StatusNotifierItem tray icon. Needs a panel that hosts one, such as waybar, KDE Plasma, or GNOME with the AppIndicator extension. |
-| `tools` | all four | Tools whose logs are read and watched. Disabled tools are not scanned. |
+| `tools` | all four | Tools whose logs are read and watched. A disabled tool's directories are not scanned or watched, and its data is dropped. |
 | `widget.layer` | `"bottom"` | Where the widget lives; see [Layers](#layers). |
 | `widget.anchor` | `"top-right"` | Screen position of a layer widget. |
 | `widget.margin` | `16` | Distance in pixels from the anchored edges. |
@@ -29,8 +39,9 @@ sessions = 5
 | `widget.width` | `380` | Card width in pixels. |
 | `widget.rows` | `5` | Rows in the models, projects and tools list. |
 | `widget.sessions` | `5` | Recent sessions shown; `0` hides the section. |
+| `widget.sections.*` | `true` | Whether each part of the card is shown. |
 
-Changes to `tools`, `tray` and `widget` take effect at the next start. The `[window]` table of earlier versions is accepted and ignored.
+Edits to the file take effect at the next start; the settings window applies them immediately. The `[window]` table of earlier versions is accepted and ignored.
 
 ## Layers
 
@@ -42,7 +53,9 @@ On compositors with wlr-layer-shell (Hyprland, Sway, KDE Plasma, niri and other 
 | `top`, `overlay` | Above windows, like a panel popup. Hidden at startup with `--background`; summoned with `toktop --toggle` or the tray icon, dismissed with Escape. |
 | `window` | An ordinary window. Also used when the compositor has no layer-shell support (GNOME, X11) or toktop is built without the `layer-shell` feature. |
 
-A layer widget keeps toktop running when hidden, so `toktop --toggle` can bring it back. Right-click the widget for Refresh prices, Hide and Quit.
+A layer widget keeps toktop running when hidden, so `toktop --toggle` can bring it back. Right-click the widget for Settings, Refresh prices, Hide and Quit.
+
+The card never grows taller than its monitor; longer content scrolls. On Hyprland, space reserved by panels such as waybar is subtracted too, read from Hyprland's IPC socket. Other compositors do not report it, so with a panel there, hide sections or lower `rows` and `sessions` until the card fits.
 
 ### Hyprland
 
@@ -79,6 +92,7 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 | `toktop` | Start, or show the running instance's widget. |
 | `toktop --background` | Start without showing a `top`, `overlay` or `window` widget; a `window` still opens when there is no tray icon to reopen it from. Does nothing if toktop is running. |
 | `toktop --toggle` | Show or hide the running instance's widget; starts toktop if it is not running. |
+| `toktop --settings` | Open the settings window; starts toktop if it is not running. |
 | `toktop --print [period]` | Print a summary without the GUI. |
 
 ## Environment variables

@@ -11,6 +11,7 @@ use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use toktop::aggregate::{Period, Row, SessionRow, Summary, Usage};
+use toktop::config::{self, Sections};
 use toktop::format;
 use toktop::model::{LimitWindow, Tool};
 
@@ -263,6 +264,7 @@ struct BreakdownSlot {
     root: gtk::Box,
     dot: gtk::Box,
     name: gtk::Label,
+    speed: gtk::Label,
     tokens: gtk::Label,
     share: gtk::Label,
 }
@@ -273,18 +275,24 @@ impl BreakdownSlot {
         root.add_css_class("row");
         let dot = dot();
         let name = ellipsized(&[]);
+        let speed = label(&["numeric", "dim"]);
+        speed.set_xalign(1.0);
         let tokens = label(&["numeric"]);
+        tokens.set_width_chars(6);
+        tokens.set_xalign(1.0);
         let share = label(&["numeric", "dim"]);
         share.set_width_chars(4);
         share.set_xalign(1.0);
         root.append(&dot);
         root.append(&name);
+        root.append(&speed);
         root.append(&tokens);
         root.append(&share);
         BreakdownSlot {
             root,
             dot,
             name,
+            speed,
             tokens,
             share,
         }
@@ -367,6 +375,7 @@ pub struct Widget {
     rate: Tile,
     cache: Tile,
     streak: Tile,
+    sections: Sections,
     limits: gtk::Box,
     limits_title: gtk::Label,
     limits_plan: gtk::Label,
@@ -390,14 +399,14 @@ impl Widget {
     /// `on_period` runs when the user picks a period in the switcher.
     pub fn new(
         selected: Period,
-        width: i32,
-        rows: usize,
-        sessions: usize,
+        settings: &config::Widget,
         on_period: impl Fn(Period) + 'static,
     ) -> Rc<Widget> {
+        let sections = settings.sections;
+        let sessions = settings.shown_sessions();
         let root = vbox(0);
         root.add_css_class("card");
-        root.set_size_request(width, -1);
+        root.set_size_request(settings.width, -1);
 
         // Header: logo with live indicator, period switcher.
         let logo = hbox(6);
@@ -457,6 +466,7 @@ impl Widget {
         for tile in [&speed, &rate, &cache, &streak] {
             tiles.append(&tile.root);
         }
+        tiles.set_visible(sections.stats);
         root.append(&tiles);
 
         // Codex rate limits.
@@ -483,7 +493,9 @@ impl Widget {
         root.append(&limits);
 
         // Breakdown by model, project or tool.
-        root.append(&separator());
+        let breakdown_separator = separator();
+        breakdown_separator.set_visible(sections.breakdown);
+        root.append(&breakdown_separator);
         let tabs = hbox(0);
         tabs.add_css_class("tabs");
         let mut breakdown_tabs = Vec::new();
@@ -503,7 +515,9 @@ impl Widget {
         let breakdown = vbox(0);
         breakdown.add_css_class("section");
         breakdown.append(&tabs);
-        let rows: Vec<BreakdownSlot> = (0..rows.max(1)).map(|_| BreakdownSlot::new()).collect();
+        let rows: Vec<BreakdownSlot> = (0..settings.rows.max(1))
+            .map(|_| BreakdownSlot::new())
+            .collect();
         for slot in &rows {
             slot.root.set_visible(false);
             breakdown.append(&slot.root);
@@ -512,10 +526,13 @@ impl Widget {
         rows_empty.set_label("No usage in this period");
         rows_empty.set_visible(false);
         breakdown.append(&rows_empty);
+        breakdown.set_visible(sections.breakdown);
         root.append(&breakdown);
 
         // Recent sessions.
-        root.append(&separator());
+        let sessions_separator = separator();
+        sessions_separator.set_visible(sessions > 0);
+        root.append(&sessions_separator);
         let sessions_box = vbox(0);
         sessions_box.add_css_class("section");
         let sessions_count = label(&["caption"]);
@@ -532,14 +549,17 @@ impl Widget {
         sessions_box.set_visible(sessions > 0);
         root.append(&sessions_box);
 
-        // Activity heatmap.
-        root.append(&separator());
+        // Activity heatmap, and the trend under the same separator.
+        let charts_separator = separator();
+        charts_separator.set_visible(sections.activity || sections.trend);
+        root.append(&charts_separator);
         let activity = vbox(6);
         activity.add_css_class("section");
         let active_days = label(&["caption"]);
         activity.append(&section_header(&section("ACTIVITY"), &active_days));
         let heatmap = Heatmap::new();
         activity.append(&heatmap.area);
+        activity.set_visible(sections.activity);
         root.append(&activity);
 
         // Trend.
@@ -549,6 +569,7 @@ impl Widget {
         trend_box.append(&section_header(&section("TREND · 30D"), &peak));
         let trend = Trend::new();
         trend_box.append(&trend.area);
+        trend_box.set_visible(sections.trend);
         root.append(&trend_box);
 
         let widget = Rc::new(Widget {
@@ -563,6 +584,7 @@ impl Widget {
             rate,
             cache,
             streak,
+            sections,
             limits,
             limits_title,
             limits_plan,
@@ -682,13 +704,19 @@ impl Widget {
         });
 
         self.update_limits(summary, now);
-        self.update_breakdown(summary);
+        if self.sections.breakdown {
+            self.update_breakdown(summary);
+        }
         self.update_sessions(summary, now);
         self.update_charts(summary);
     }
 
     fn update_limits(&self, summary: &Summary, now_ms: i64) {
-        let Some(limits) = &summary.codex_limits else {
+        let Some(limits) = summary
+            .codex_limits
+            .as_ref()
+            .filter(|_| self.sections.limits)
+        else {
             self.limits.set_visible(false);
             return;
         };
@@ -734,6 +762,8 @@ impl Widget {
             slot.root.set_visible(true);
             set_family(&slot.dot, family);
             slot.name.set_label(name);
+            slot.speed
+                .set_label(&usage.speed().map_or_else(String::new, format::speed));
             slot.tokens.set_label(&format::tokens(usage.tokens.total()));
             slot.share
                 .set_label(&format::percent(usage.tokens.total() as f64 / total));
@@ -751,6 +781,9 @@ impl Widget {
     }
 
     fn update_sessions(&self, summary: &Summary, now_ms: i64) {
+        if self.sessions.is_empty() {
+            return;
+        }
         for (index, slot) in self.sessions.iter().enumerate() {
             match summary.sessions.get(index) {
                 Some(session) => {
@@ -777,19 +810,23 @@ impl Widget {
             tokens: usage.map_or(0, |usage| usage.tokens.total()),
             cost: available.then(|| usage.map_or(0.0, |usage| usage.cost)),
         };
-        self.heatmap.set(
-            today,
-            summary
-                .daily
-                .iter()
-                .map(|row| day(row.date, Some(&row.usage)))
-                .collect(),
-        );
-        self.active_days.set_label(&match summary.daily.len() {
-            1 => "1 active day".to_owned(),
-            days => format!("{days} active days"),
-        });
-
+        if self.sections.activity {
+            self.heatmap.set(
+                today,
+                summary
+                    .daily
+                    .iter()
+                    .map(|row| day(row.date, Some(&row.usage)))
+                    .collect(),
+            );
+            self.active_days.set_label(&match summary.daily.len() {
+                1 => "1 active day".to_owned(),
+                days => format!("{days} active days"),
+            });
+        }
+        if !self.sections.trend {
+            return;
+        }
         let trend: Vec<chart::Day> = (0..TREND_DAYS)
             .rev()
             .map(|back| {

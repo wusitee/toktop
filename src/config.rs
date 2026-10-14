@@ -43,6 +43,64 @@ pub struct Widget {
     pub rows: usize,
     /// Recent sessions shown.
     pub sessions: usize,
+    pub sections: Sections,
+}
+
+/// Parts of the card that are shown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sections {
+    /// Speed, live rate, cache and streak tiles.
+    pub stats: bool,
+    /// Codex rate limits.
+    pub limits: bool,
+    /// Models, projects and tools list.
+    pub breakdown: bool,
+    pub sessions: bool,
+    /// Activity heatmap.
+    pub activity: bool,
+    pub trend: bool,
+}
+
+impl Widget {
+    /// Recent sessions shown: none when the section is hidden.
+    pub fn shown_sessions(&self) -> usize {
+        if self.sections.sessions {
+            self.sessions
+        } else {
+            0
+        }
+    }
+
+    /// Sets how many recent sessions are shown, keeping hidden ones hidden.
+    pub fn set_session_count(&mut self, count: usize) {
+        if self.shown_sessions() == 0 {
+            self.sections.sessions = false;
+        }
+        self.sessions = count;
+    }
+
+    /// Shows or hides recent sessions. A count of zero, which also hides
+    /// them, becomes one when they are shown.
+    pub fn show_sessions(&mut self, on: bool) {
+        self.sections.sessions = on;
+        if on {
+            self.sessions = self.sessions.max(1);
+        }
+    }
+}
+
+impl Default for Sections {
+    fn default() -> Self {
+        Sections {
+            stats: true,
+            limits: true,
+            breakdown: true,
+            sessions: true,
+            activity: true,
+            trend: true,
+        }
+    }
 }
 
 /// Where the widget lives. The first four are layer-shell layers, from the
@@ -119,6 +177,7 @@ impl Default for Widget {
             width: 380,
             rows: 5,
             sessions: 5,
+            sections: Sections::default(),
         }
     }
 }

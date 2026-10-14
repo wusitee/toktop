@@ -20,6 +20,7 @@ mod ffi {
     pub const EDGE_RIGHT: i32 = 1;
     pub const EDGE_TOP: i32 = 2;
     pub const EDGE_BOTTOM: i32 = 3;
+    pub const KEYBOARD_NONE: i32 = 0;
     pub const KEYBOARD_ON_DEMAND: i32 = 2;
 
     #[link(name = "gtk4-layer-shell")]
@@ -94,6 +95,25 @@ pub fn place(window: &impl IsA<gtk::Window>, config: &Widget, monitor: Option<&g
             }
             // Clicks always work; the keyboard is taken only when clicked.
             ffi::gtk_layer_set_keyboard_mode(window, ffi::KEYBOARD_ON_DEMAND);
+        }
+    }
+}
+
+/// Whether a layer surface may take keyboard focus when clicked (and, on
+/// some compositors, when it maps). Can change at any time after [`place`].
+#[cfg_attr(not(feature = "layer-shell"), allow(unused_variables))]
+pub fn set_keyboard(window: &impl IsA<gtk::Window>, on_demand: bool) {
+    #[cfg(feature = "layer-shell")]
+    {
+        use gtk::glib::translate::ToGlibPtr;
+        let mode = if on_demand {
+            ffi::KEYBOARD_ON_DEMAND
+        } else {
+            ffi::KEYBOARD_NONE
+        };
+        // SAFETY: `window` is a live GtkWindow initialized for layer-shell.
+        unsafe {
+            ffi::gtk_layer_set_keyboard_mode(window.as_ref().to_glib_none().0, mode);
         }
     }
 }
