@@ -45,11 +45,13 @@ pub struct State {
     task_started_turn_ids: HashSet<String>,
     /// Cumulative totals seen in parent replay, which may be re-reported later.
     inherited_totals: HashSet<u64>,
-    /// Latest input item, the start of the current request.
+    /// Latest input item before the current request's first output.
     request_start: Option<i64>,
     /// Latest output item of the current request.
     response_end: Option<i64>,
-    last_input: Option<i64>,
+    /// Latest input item after the current request's output (a tool result),
+    /// which starts the next request.
+    next_start: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -228,6 +230,10 @@ impl Window {
 
 impl State {
     pub fn line(&mut self, session: &mut Session, raw: &[u8]) {
+        if is_turn_end(raw) {
+            self.end_turn();
+            return;
+        }
         if let Some((ts, item)) = response_item(raw) {
             if matches!(item, Item::UserMessage)
                 && session.prompt.is_none()
@@ -335,59 +341,56 @@ impl State {
                 if let Some(limits) = payload.rate_limits.filter(|_| !replay) {
                     record_limits(session, ts, limits);
                 }
-                let duration = self.finish_request();
                 if let Some(info) = payload.info {
-                    self.token_count(session, ts, info, replay, duration);
+                    self.token_count(session, ts, info, replay);
                 }
             }
             _ => {}
         }
     }
 
+    /// Clears request timing at the end of a turn, completed or aborted, so
+    /// an unfinished response cannot lend its start to the next turn.
+    fn end_turn(&mut self) {
+        self.request_start = None;
+        self.response_end = None;
+        self.next_start = None;
+    }
+
+    /// Tracks request boundaries in log order; equal timestamps are common
+    /// for fast tools.
     fn timing(&mut self, ts: i64, item: Item) {
         match item {
             Item::Input | Item::UserMessage => {
-                self.last_input = Some(ts);
-                // Tool outputs after the model's output belong to this
-                // request; they start the next one.
                 if self.response_end.is_none() {
                     self.request_start = Some(ts);
+                } else {
+                    self.next_start = Some(ts);
                 }
             }
-            Item::Output => {
-                self.response_end = Some(ts);
-                if self.request_start.is_none() {
-                    self.request_start = self.last_input;
-                }
-            }
+            Item::Output => self.response_end = Some(ts),
         }
     }
 
-    /// Ends the current request at a `token_count` row and returns its
-    /// duration in milliseconds, 0 when unknown.
+    /// Ends the current request when its usage is accepted and returns its
+    /// duration in milliseconds, 0 when unknown. Each input starts at most
+    /// one request.
     fn finish_request(&mut self) -> u32 {
+        // Before any output, the pending start belongs to the coming response.
         let Some(end) = self.response_end.take() else {
             return 0;
         };
-        let duration = self
-            .request_start
+        let start = std::mem::replace(&mut self.request_start, self.next_start.take());
+        start
             .map(|start| end - start)
             .filter(|ms| *ms > 0 && *ms <= super::MAX_RESPONSE_MS)
-            .map_or(0, |ms| ms as u32);
-        self.request_start = self.last_input.filter(|input| *input > end);
-        duration
+            .map_or(0, |ms| ms as u32)
     }
 
-    fn token_count(
-        &mut self,
-        session: &mut Session,
-        ts: i64,
-        info: Info,
-        replay: bool,
-        duration_ms: u32,
-    ) {
+    fn token_count(&mut self, session: &mut Session, ts: i64, info: Info, replay: bool) {
         let total = info.total_token_usage;
         if replay {
+            self.finish_request();
             if let Some(total) = total {
                 self.inherited_totals.insert(total.total());
                 self.last_total = Some(total);
@@ -437,6 +440,8 @@ impl State {
                 match total.delta(&previous) {
                     Some(delta) => delta,
                     None => {
+                        // A counter reset still ends the current request.
+                        self.finish_request();
                         self.last_total = Some(total);
                         self.inherited_totals.clear();
                         return;
@@ -452,6 +457,9 @@ impl State {
         if info.model.is_some() {
             self.model = info.model;
         }
+        // Only accepted usage ends a request: unchanged and rate-limit-only
+        // snapshots can arrive mid-response.
+        let duration_ms = self.finish_request();
         let tokens = request.tokens();
         if tokens.is_empty() {
             return;
@@ -500,6 +508,17 @@ fn user_prompt(raw: &[u8]) -> Option<String> {
         .content
         .iter()
         .find_map(|item| prompt_title(item.text.as_deref()?))
+}
+
+/// Whether a row is a `task_complete` or `turn_aborted` event, read from its
+/// prefix like [`response_item`].
+fn is_turn_end(raw: &[u8]) -> bool {
+    const KIND: &[u8] = b"\"type\":\"event_msg\",\"payload\":{\"type\":\"";
+    let head = &raw[..raw.len().min(160)];
+    memchr::memmem::find(head, KIND).is_some_and(|start| {
+        let kind = &head[start + KIND.len()..];
+        kind.starts_with(b"task_complete\"") || kind.starts_with(b"turn_aborted\"")
+    })
 }
 
 /// Timestamp and direction of a `response_item` row, read from its prefix:

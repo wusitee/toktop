@@ -136,16 +136,14 @@ fn summary_filters_by_period_and_dedups_across_files() {
     let last_month = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
 
     let mut store = Store::default();
-    store.insert_session(
-        "/a.jsonl".into(),
-        Tool::ClaudeCode,
-        session(
-            "a",
-            "/work/app",
-            "claude-opus-5-5",
-            vec![(ms(today, 9), 100, Some("m1")), (ms(monday, 9), 20, None)],
-        ),
+    let mut first = session(
+        "a",
+        "/work/app",
+        "claude-opus-5-5",
+        vec![(ms(today, 9), 100, Some("m1")), (ms(monday, 9), 20, None)],
     );
+    first.events[0].duration_ms = 1000;
+    store.insert_session("/a.jsonl".into(), Tool::ClaudeCode, first);
     // A resumed copy of the same response in another file, with more
     // complete counts: counted once, at the most complete values.
     let mut resumed = session(
@@ -155,6 +153,7 @@ fn summary_filters_by_period_and_dedups_across_files() {
         vec![(ms(today, 9), 100, Some("m1"))],
     );
     resumed.events[0].tokens.output = 50;
+    resumed.events[0].duration_ms = 4000;
     store.insert_session("/b.jsonl".into(), Tool::ClaudeCode, resumed);
     store.insert_session(
         "/c.jsonl".into(),
@@ -179,6 +178,8 @@ fn summary_filters_by_period_and_dedups_across_files() {
     let today_summary = aggregate::summarize(&store, &prices, Period::Today, now);
     assert_eq!(today_summary.total.tokens.input, 103);
     assert_eq!(today_summary.total.tokens.output, 50);
+    // The most complete copy's duration goes with its counts.
+    assert_eq!(today_summary.total.speed(), Some(12.5));
     assert!((today_summary.total.cost - 1.0).abs() < 1e-9);
     assert!(today_summary.prices_available);
     assert_eq!(today_summary.unpriced, ["gpt-6.1-sol"]);
@@ -266,6 +267,31 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
     assert_eq!(row.last_activity, ms(today, 11));
     assert_eq!(summary.total.speed(), Some(100.0));
     assert_eq!(summary.streak_days, 2);
+
+    // A row whose subagent alone has usage in the period keeps the parent's
+    // prompt and project.
+    let mut store = Store::default();
+    let mut parent = session(
+        "p",
+        "/work/parent",
+        "gpt-6.1-sol",
+        vec![(ms(yesterday, 9), 1, None)],
+    );
+    parent.prompt = Some("Parent task".into());
+    let mut child = session(
+        "c",
+        "/work/child",
+        "gpt-6.1-sol",
+        vec![(ms(today, 9), 1, None)],
+    );
+    child.parent = Some("p".into());
+    child.prompt = Some("Child subtask".into());
+    store.insert_session("/p.jsonl".into(), Tool::Codex, parent);
+    store.insert_session("/c.jsonl".into(), Tool::Codex, child);
+    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::Today, now);
+    let row = &summary.sessions[0];
+    assert_eq!((row.title.as_str(), row.subagents), ("Parent task", 1));
+    assert_eq!(row.project.as_deref(), Some("/work/parent"));
 
     // Without usage today, a streak still runs through yesterday.
     let day = |date| aggregate::DayRow {

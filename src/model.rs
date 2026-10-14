@@ -166,9 +166,8 @@ impl Event {
             .max(other.cache_write_1h_raw)
             .max(self.tokens.cache_write_1h);
         self.tokens.cache_write_1h = self.cache_write_1h_raw.min(self.tokens.cache_write);
-        if self.duration_ms == 0 {
-            self.duration_ms = other.duration_ms;
-        }
+        // Like the token counts, the most complete copy's duration wins.
+        self.duration_ms = self.duration_ms.max(other.duration_ms);
     }
 }
 

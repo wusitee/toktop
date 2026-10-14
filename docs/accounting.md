@@ -65,7 +65,7 @@ Source: `gen_metadata` rows, each a protobuf without a published schema. Field n
 Each event may carry a response time (`duration_ms`): from the request, the latest prompt or tool result before the response, to the last output written for it. It includes time to first token, thinking and any retries, so speeds are end-to-end and lower than a model's raw decode rate.
 
 - **Claude Code.** The request starts at the latest `user` or `attachment` line; the response ends at the last copy of its `message.id` + `requestId`.
-- **Codex.** The request starts at the latest input `response_item` (a user message or a tool call output) and ends at the last output item (reasoning, an assistant message or any `*_call`) before its `token_count`. Tool outputs written after the model's output start the next request. Both are read from the line prefix (`{"timestamp":…,"type":"response_item","payload":{"type":…`), so other rows are never JSON-parsed.
+- **Codex.** The request starts at the latest input `response_item` (a user message or a tool call output) and ends at the last output item (reasoning, an assistant message or any `*_call`) before its `token_count`. Tool outputs written after the model's output start the next request; order in the log decides, not timestamps, which often tie. Only an accepted usage snapshot or a counter reset ends a request that has output, so unchanged or rate-limit-only snapshots mid-response do not. `task_complete` and `turn_aborted` clear pending timing. Each input starts at most one request; a response with no unused input before it has no duration. Both are read from the line prefix (`{"timestamp":…,"type":"response_item","payload":{"type":…`), so other rows are never JSON-parsed.
 - **Antigravity.** No response time.
 
 Times of zero or over 15 minutes (a lost request start) are discarded. Average speed is the ratio of sums, output plus reasoning tokens over response time, across timed requests; untimed requests do not count.
@@ -77,7 +77,7 @@ Times of zero or over 15 minutes (a lost request start) are discarded. Average s
 
 ## Cross-file deduplication
 
-A response copied into several files (resumed or forked sessions) is counted once, at aggregation time, using each event's stable key. Copies merge with the same rules as Claude streaming copies: per-field maxima, split-derived input replacing bare input, and the raw 1-hour cache-write maximum clamped only after merging. Events keep the input-split provenance and the raw split across files for this.
+A response copied into several files (resumed or forked sessions) is counted once, at aggregation time, using each event's stable key. Copies merge with the same rules as Claude streaming copies: per-field maxima (the response time included), split-derived input replacing bare input, and the raw 1-hour cache-write maximum clamped only after merging. Events keep the input-split provenance and the raw split across files for this.
 
 A keyed copy that carries only a raw cache split stays pending for later copies. Events whose merged buckets are still empty are excluded from totals, request counts and session lists.
 

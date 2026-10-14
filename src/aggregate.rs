@@ -1,6 +1,6 @@
 //! Turns parsed sessions into the totals and breakdowns the UI shows.
 
-use crate::model::{Event, RateLimits, Tokens, Tool};
+use crate::model::{Event, RateLimits, Session, Tokens, Tool};
 use crate::pricing::{Price, PriceTable};
 use crate::store::Store;
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
@@ -280,6 +280,19 @@ pub fn summarize<'a>(
         }
     }
 
+    // Session metadata by id, independent of usage in the period, so a row
+    // whose subagents alone have usage still shows its own title.
+    let mut metadata: HashMap<(Tool, &str), &Session> = HashMap::new();
+    for (_, entry) in &files {
+        let session = &entry.session;
+        let known = metadata
+            .entry((entry.tool, session.id.as_str()))
+            .or_insert(session);
+        if known.title.is_none() && known.prompt.is_none() {
+            *known = session;
+        }
+    }
+
     // Subagent sessions are grouped under their top-level session.
     let parents: HashMap<(Tool, &str), &str> = files
         .iter()
@@ -396,20 +409,25 @@ pub fn summarize<'a>(
     }
 
     for ((tool, id), group) in groups {
+        let root = metadata.get(&(tool, id));
         let title = store
             .titles
             .get(id)
             .map(String::as_str)
             .or(group.title)
+            .or(root.and_then(|root| root.title.as_deref().or(root.prompt.as_deref())))
             .or(group.fallback_title)
             .map_or_else(|| id.chars().take(8).collect(), str::to_owned);
+        let project = root
+            .and_then(|root| root.project.as_deref())
+            .or(group.project);
         let mut models: Vec<(&str, u64)> = group.models.into_iter().collect();
         models.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
         summary.sessions.push(SessionRow {
             tool,
             id: id.to_owned(),
             title,
-            project: group.project.map(str::to_owned),
+            project: project.map(str::to_owned),
             last_activity: group.last_activity,
             usage: group.usage,
             models: models
