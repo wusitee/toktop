@@ -619,6 +619,11 @@ impl Widget {
         widget
     }
 
+    /// Caps the detail card's height, like the card's own.
+    pub fn set_max_height(&self, height: i32) {
+        self.detail_card.set_max_height(height);
+    }
+
     /// Opens detail cards from breakdown rows and chart days.
     fn connect_details(self: &Rc<Self>) {
         for (index, slot) in self.rows.iter().enumerate() {
@@ -674,14 +679,22 @@ impl Widget {
             });
             state.replace(selection.map(|selection| (selection, y)));
         });
+        let state = picked.clone();
+        click.connect_cancel(move |_, _| {
+            state.take();
+        });
         let weak = Rc::downgrade(self);
-        click.connect_released(move |gesture, _, _, _| {
+        click.connect_released(move |gesture, _, x, y_released| {
             let Some((selection, y)) = picked.take() else {
                 return;
             };
             let (Some(widget), Some(source)) = (weak.upgrade(), gesture.widget()) else {
                 return;
             };
+            // Dragging off the item before releasing cancels the click.
+            if !source.contains(x, y_released) {
+                return;
+            }
             let summary = widget.last.borrow().clone();
             if let Some(summary) = summary {
                 widget.show_detail(selection, &source, at_point.then_some(y), &summary);

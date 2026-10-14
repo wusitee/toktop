@@ -34,7 +34,9 @@ pub enum Selection {
 
 pub struct Detail {
     popover: gtk::Popover,
+    kind: gtk::Label,
     content: gtk::Box,
+    scroll: gtk::ScrolledWindow,
     selected: Rc<RefCell<Option<Selection>>>,
 }
 
@@ -42,14 +44,37 @@ impl Detail {
     /// A detail card attached to `card`, opening on the side away from the
     /// screen edge the card is anchored to.
     pub fn new(card: &gtk::Box, anchor: Anchor, width: i32) -> Detail {
+        // The header stays while the body is rebuilt, so a refresh cannot
+        // cancel a click on the close button.
+        let kind = label(&["caption", "detail-kind"]);
+        let close = gtk::Button::builder()
+            .icon_name("window-close-symbolic")
+            .tooltip_text("Close")
+            .css_classes(["icon"])
+            .valign(gtk::Align::Center)
+            .build();
         let content = vbox(0);
-        content.set_size_request(width, -1);
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .child(&content)
+            .build();
+        let frame = vbox(0);
+        frame.set_size_request(width, -1);
+        frame.append(&section_header(&kind, &close));
+        frame.append(&scroll);
         let popover = gtk::Popover::builder()
             .has_arrow(false)
             .autohide(false)
-            .child(&content)
+            .child(&frame)
             .css_classes(["detail"])
             .build();
+        let target = popover.downgrade();
+        close.connect_clicked(move |_| {
+            if let Some(popover) = target.upgrade() {
+                popover.popdown();
+            }
+        });
         let (_, _, left, right) = anchor.edges();
         popover.set_position(if left && !right {
             gtk::PositionType::Right
@@ -66,9 +91,17 @@ impl Detail {
         });
         Detail {
             popover,
+            kind,
             content,
+            scroll,
             selected,
         }
+    }
+
+    /// Caps the card's height; a taller body scrolls.
+    pub fn set_max_height(&self, height: i32) {
+        // Leaves room for the header and padding.
+        self.scroll.set_max_content_height((height - 60).max(100));
     }
 
     /// Shows `selection` level with the card rows from `y` to `y + height`
@@ -114,8 +147,9 @@ impl Detail {
         let Some(info) = Info::find(selection, summary) else {
             return false;
         };
+        self.kind.set_label(&info.kind);
         clear(&self.content);
-        info.build(&self.content, &self.popover, summary.prices_available);
+        info.build(&self.content, summary.prices_available);
         true
     }
 }
@@ -350,25 +384,10 @@ impl Info {
         Some(info)
     }
 
-    fn build(self, card: &gtk::Box, popover: &gtk::Popover, prices_available: bool) {
+    fn build(self, card: &gtk::Box, prices_available: bool) {
         let usage = &self.usage;
         let total = usage.tokens.total();
 
-        let kind = label(&["caption", "detail-kind"]);
-        kind.set_label(&self.kind);
-        let close = gtk::Button::builder()
-            .icon_name("window-close-symbolic")
-            .tooltip_text("Close")
-            .css_classes(["icon"])
-            .valign(gtk::Align::Center)
-            .build();
-        let target = popover.downgrade();
-        close.connect_clicked(move |_| {
-            if let Some(popover) = target.upgrade() {
-                popover.popdown();
-            }
-        });
-        card.append(&section_header(&kind, &close));
         let header = hbox(8);
         let mark = dot();
         set_family(&mark, self.family);
