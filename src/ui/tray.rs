@@ -17,6 +17,7 @@ pub enum Command {
     Show,
     Period(Period),
     RefreshPrices,
+    Settings,
     Quit,
 }
 
@@ -106,6 +107,13 @@ impl ksni::Tray for Item {
             StandardItem {
                 label: "Refresh prices".into(),
                 activate: Box::new(|item: &mut Self| item.send(Command::RefreshPrices)),
+                ..StandardItem::default()
+            }
+            .into(),
+            StandardItem {
+                label: "Settings".into(),
+                icon_name: "preferences-system".into(),
+                activate: Box::new(|item: &mut Self| item.send(Command::Settings)),
                 ..StandardItem::default()
             }
             .into(),

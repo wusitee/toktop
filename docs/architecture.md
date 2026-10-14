@@ -1,6 +1,6 @@
 # Architecture
 
-toktop reads the local logs of AI coding tools, turns them into usage events and aggregates them for display. It is a single process with no subprocesses. The only network access is the daily price download.
+toktop reads the local logs of AI coding tools, turns them into usage events and aggregates them for display. It is a single process with no subprocesses. The only network access is the daily price download. On Hyprland, the widget also asks the compositor's IPC socket for the space reserved by panels.
 
 ## Threads
 
@@ -17,11 +17,12 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 
 `Shell` (in `src/ui/mod.rs`) lives for the whole process. It owns the worker, the latest summary, the settings ([configuration.md](configuration.md)) and the tray icon. The widget window is built on demand from the latest summary and dropped when hidden.
 
-- toktop is a single-instance `GApplication`. Running `toktop` while it is already running shows the existing widget; `toktop --background` then does nothing; `toktop --toggle` activates the primary instance's `app.toggle` action over D-Bus.
+- toktop is a single-instance `GApplication`. Running `toktop` while it is already running shows the existing widget; `toktop --background` then does nothing; `toktop --toggle` and `toktop --settings` activate the primary instance's `app.toggle` and `app.settings` actions over D-Bus.
 - When the compositor supports wlr-layer-shell and `widget.layer` is not `window`, the window becomes a layer surface (`src/ui/layer.rs`, a few direct bindings to libgtk4-layer-shell). Otherwise it is an ordinary window.
 - The application holds itself open while a layer widget or tray icon exists, so hiding the widget keeps toktop running. A plain window without a tray icon quits when closed.
 - Toggling closes an open layer widget. An open ordinary window is raised first if it is not focused.
 - The period is saved to the config file when it changes.
+- The settings window (`src/ui/settings.rs`) edits the settings through `Shell`, which saves them and applies them at once: a changed tool list is sent to the worker, which replaces its store and watcher, and a changed widget setting rebuilds an open widget.
 
 ## Data flow
 
@@ -41,7 +42,7 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 | `src/paths.rs` | Source and cache locations, with the tools' environment overrides. |
 | `src/watch.rs` | Recursive inotify watcher. |
 | `src/worker.rs` | Worker thread loop. |
-| `src/ui/` | Application shell (`mod.rs`), the card (`widget.rs`, `style.css`), heatmap and trend charts, layer-shell bindings and tray icon. |
+| `src/ui/` | Application shell (`mod.rs`), the card (`widget.rs`, `style.css`), heatmap and trend charts, settings window, layer-shell bindings, Hyprland reserved-space query and tray icon. |
 | `src/config.rs` | Settings file. |
 
 ## Incremental reads

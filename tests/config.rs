@@ -1,7 +1,7 @@
 //! Settings file contracts.
 
 use toktop::aggregate::Period;
-use toktop::config::{Anchor, Config, Layer, Widget};
+use toktop::config::{Anchor, Config, Layer, Sections, Widget};
 use toktop::model::Tool;
 
 #[test]
@@ -33,6 +33,10 @@ fn saved_settings_round_trip() {
         widget: Widget {
             layer: Layer::Overlay,
             output: "DP-1".into(),
+            sections: Sections {
+                activity: false,
+                ..Sections::default()
+            },
             ..Widget::default()
         },
         legacy_window: None,
@@ -49,6 +53,22 @@ fn saved_settings_round_trip() {
 }
 
 #[test]
+fn sessions_are_hidden_by_their_switch_or_a_zero_count() {
+    let mut widget = Config::parse("[widget]\nsessions = 0").unwrap().widget;
+    assert_eq!(widget.shown_sessions(), 0);
+    widget.show_sessions(false);
+    assert_eq!(widget.shown_sessions(), 0);
+    // Changing the count keeps them hidden.
+    widget.set_session_count(3);
+    assert_eq!(widget.shown_sessions(), 0);
+    widget.show_sessions(true);
+    assert_eq!(widget.shown_sessions(), 3);
+    widget.sessions = 7;
+    widget.show_sessions(false);
+    assert_eq!((widget.shown_sessions(), widget.sessions), (0, 7));
+}
+
+#[test]
 fn invalid_files_are_errors() {
     for text in [
         "period = \"yesterday\"",
@@ -56,6 +76,7 @@ fn invalid_files_are_errors() {
         "tray = \"yes\"",
         "unknown = 1",
         "[widget]\nlayer = \"desktop\"",
+        "[widget.sections]\nheatmap = false",
         "period = ",
     ] {
         assert!(Config::parse(text).is_err(), "{text}");
