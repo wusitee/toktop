@@ -2,7 +2,7 @@
 
 A native Linux desktop widget for AI coding tool token usage, written in Rust with GTK 4 and libadwaita. It is a lightweight reimplementation of [Token Monitor](https://github.com/Javis603/token-monitor) for Linux, running as a single process that updates within about a second of each turn.
 
-Supported tools: Claude Code, Codex and Antigravity.
+Supported tools: Claude Code, Codex, Antigravity and [Pi](https://github.com/earendil-works/pi).
 
 ## Build
 

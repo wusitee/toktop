@@ -95,6 +95,7 @@ fn tool_family(tool: Tool) -> &'static str {
         Tool::ClaudeCode => "claude",
         Tool::Codex => "openai",
         Tool::Antigravity => "gemini",
+        Tool::Pi => "pi",
     }
 }
 

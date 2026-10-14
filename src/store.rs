@@ -71,6 +71,7 @@ pub fn classify(path: &Path) -> Option<Tool> {
             Tool::ClaudeCode => name.ends_with(".jsonl"),
             Tool::Codex => name.starts_with("rollout-") && name.ends_with(".jsonl"),
             Tool::Antigravity => name.ends_with(".db"),
+            Tool::Pi => name.ends_with(".jsonl"),
         };
         return matches.then_some(tool);
     }

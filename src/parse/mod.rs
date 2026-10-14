@@ -1,12 +1,13 @@
 //! Per-tool source parsers.
 //!
-//! Claude Code and Codex write append-only JSONL, so their parsers keep a
+//! Claude Code, Codex and Pi write append-only JSONL, so their parsers keep a
 //! [`Cursor`] and consume only bytes appended since the previous read.
 //! Antigravity writes SQLite databases, which are re-read whole on change.
 
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
+pub mod pi;
 pub mod proto;
 
 use crate::model::{Session, Tool};
@@ -33,6 +34,7 @@ pub struct Cursor {
 pub enum LineState {
     Claude(claude::State),
     Codex(Box<codex::State>),
+    Pi(pi::State),
 }
 
 impl LineState {
@@ -41,6 +43,7 @@ impl LineState {
             Tool::ClaudeCode => Some(LineState::Claude(claude::State::default())),
             Tool::Codex => Some(LineState::Codex(Box::default())),
             Tool::Antigravity => None,
+            Tool::Pi => Some(LineState::Pi(pi::State::default())),
         }
     }
 
@@ -48,6 +51,7 @@ impl LineState {
         match self {
             LineState::Claude(state) => state.line(session, line),
             LineState::Codex(state) => state.line(session, line),
+            LineState::Pi(state) => state.line(session, line),
         }
     }
 }

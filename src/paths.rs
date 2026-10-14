@@ -40,6 +40,11 @@ pub fn source_roots(tool: Tool) -> Vec<PathBuf> {
             .into_iter()
             .map(|base| base.join("conversations"))
             .collect(),
+        Tool::Pi => vec![env_dir("PI_CODING_AGENT_SESSION_DIR").unwrap_or_else(|| {
+            env_dir("PI_CODING_AGENT_DIR")
+                .unwrap_or_else(|| home.join(".pi").join("agent"))
+                .join("sessions")
+        })],
     }
 }
 

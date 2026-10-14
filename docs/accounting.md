@@ -60,19 +60,29 @@ Source: `gen_metadata` rows, each a protobuf without a published schema. Field n
 3. A planner response step (`step_type = 15`) joined by response id (`metadata.#9.#11`), then by generation index (`metadata.#20.#3`).
 4. Session creation time, or the file's mtime.
 
+## Pi
+
+Source: `usage` on assistant messages, tool results (nested model work), `compaction` and `branch_summary` entries (summaries) and standalone `usage` entries (such as cache warming), as in Pi's own session totals. Only assistant messages and `usage` entries name their model; the others may cover any model, or several, so they count under `unknown`. An assistant message's `responseModel` (set when the provider answered with a different model) wins over the requested `model`. Pi normalizes every provider: `input`, `cacheRead` and `cacheWrite` are disjoint, `output` includes `reasoning`, and `cacheWrite1h` is a subset of `cacheWrite`. Reasoning is split out of output.
+
+- Entries form a tree. Abandoned branches consumed tokens too, so every usage-bearing entry counts.
+- `/fork` and `/clone` copy entries into a new file. Events are keyed by `responseId`, or by entry id and timestamp, and counted once across files.
+- Failed or aborted requests with empty usage are ignored.
+- The session id and project come from the `session` header; the title from the latest `session_info` name.
+
 ## Response time and speed
 
 Each event may carry a response time (`duration_ms`): from the request, the latest prompt or tool result before the response, to the last output written for it. It includes time to first token, thinking and any retries, so speeds are end-to-end and lower than a model's raw decode rate.
 
 - **Claude Code.** The request starts at the latest `user` or `attachment` line; the response ends at the last copy of its `message.id` + `requestId`.
 - **Codex.** The request starts at the latest input `response_item` (a user message or a tool call output) and ends at the last output item (reasoning, an assistant message or any `*_call`) before its `token_count`. Tool outputs written after the model's output start the next request; order in the log decides, not timestamps, which often tie. Only an accepted usage snapshot or a counter reset ends a request that has output, so unchanged or rate-limit-only snapshots mid-response do not. `task_complete` and `turn_aborted` clear pending timing. Each input starts at most one request; a response with no unused input before it has no duration. Both are read from the line prefix (`{"timestamp":…,"type":"response_item","payload":{"type":…`), so other rows are never JSON-parsed.
+- **Pi.** The message `timestamp` (set when the response starts) to the entry's write time.
 - **Antigravity.** No response time.
 
 Times of zero or over 15 minutes (a lost request start) are discarded. Average speed is the ratio of sums, output plus reasoning tokens over response time, across timed requests; untimed requests do not count.
 
 ## Sessions
 
-- **Titles**, in order: the tool's title index (Codex `session_index.jsonl`, Antigravity summaries), the transcript's own title (Claude `custom-title`, then `ai-title`, then `summary`), the start of the first typed prompt, then the session id. Prompts skip injected context: Claude `isMeta` lines and tool results, and text starting with `<`, `# AGENTS.md` or `Caveat:`. Whitespace is collapsed and the prompt cut to 120 characters.
+- **Titles**, in order: the tool's title index (Codex `session_index.jsonl`, Antigravity summaries), the transcript's own title (Claude `custom-title`, then `ai-title`, then `summary`; Pi `session_info`), the start of the first typed prompt, then the session id. Prompts skip injected context: Claude `isMeta` lines and tool results, and text starting with `<`, `# AGENTS.md` or `Caveat:`. Whitespace is collapsed and the prompt cut to 120 characters.
 - **Subagents.** A Codex rollout spawned by another (`source.subagent.thread_spawn.parent_thread_id`) is grouped under its top-level session, following nested spawns. The session row sums their usage, counts subagents with usage in the period, and lists every model used, most tokens first.
 
 ## Cross-file deduplication
