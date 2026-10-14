@@ -77,7 +77,7 @@ Periods use local time: Today, This week (from Monday), Last 7 days, This month,
 
 ## Project grouping
 
-Projects group by full path with trailing `/` characters removed. `Row.key` retains that path; `Row.label` displays its basename, extended by the fewest parent components needed to distinguish other projects in the summary. `project_label` remains a basename-only helper for standalone display. Model rows use the model id for both key and label.
+Projects group by full path with trailing `/` characters removed. `Row.key` retains that path; `Row.label` displays its basename, extended by the fewest parent components needed to distinguish other projects in the summary. Detail cards apply the same rule (`project_labels`) to the projects they list. `project_label` remains a basename-only helper for standalone display. Model rows use the model id for both key and label.
 
 ## Tests
 

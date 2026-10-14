@@ -129,17 +129,6 @@ pub(super) fn section_header(
     header
 }
 
-/// Makes `widget` look clickable and run `action` with the click position.
-fn on_click(widget: &impl IsA<gtk::Widget>, action: impl Fn(f64, f64) + 'static) {
-    widget.add_css_class("clickable");
-    widget.set_cursor_from_name(Some("pointer"));
-    let click = gtk::GestureClick::builder()
-        .button(gtk::gdk::BUTTON_PRIMARY)
-        .build();
-    click.connect_released(move |_, _, x, y| action(x, y));
-    widget.add_controller(click);
-}
-
 pub(super) fn separator() -> gtk::Separator {
     gtk::Separator::new(gtk::Orientation::Horizontal)
 }
@@ -633,50 +622,72 @@ impl Widget {
     /// Opens detail cards from breakdown rows and chart days.
     fn connect_details(self: &Rc<Self>) {
         for (index, slot) in self.rows.iter().enumerate() {
-            let weak = Rc::downgrade(self);
-            let row = slot.root.clone();
-            on_click(&slot.root, move |_, _| {
-                let Some(widget) = weak.upgrade() else { return };
-                let Some(summary) = widget.last.borrow().clone() else {
-                    return;
-                };
-                let selection = match widget.breakdown.get() {
-                    Breakdown::Models => summary
-                        .by_model
-                        .get(index)
-                        .map(|row| Selection::Model(row.key.clone())),
-                    Breakdown::Projects => summary
-                        .by_project
-                        .get(index)
-                        .map(|row| Selection::Project(row.key.clone())),
-                    Breakdown::Tools => summary
-                        .by_tool
-                        .get(index)
-                        .map(|row| Selection::Tool(row.tool)),
-                };
-                if let Some(selection) = selection {
-                    widget.show_detail(selection, &row, None, &summary);
-                }
+            self.clickable(&slot.root, false, move |widget, summary, _, _| match widget
+                .breakdown
+                .get()
+            {
+                Breakdown::Models => summary
+                    .by_model
+                    .get(index)
+                    .map(|row| Selection::Model(row.key.clone())),
+                Breakdown::Projects => summary
+                    .by_project
+                    .get(index)
+                    .map(|row| Selection::Project(row.key.clone())),
+                Breakdown::Tools => summary
+                    .by_tool
+                    .get(index)
+                    .map(|row| Selection::Tool(row.tool)),
             });
         }
+        self.clickable(&self.heatmap.area, true, |widget, _, x, y| {
+            widget.heatmap.date_at(x, y).map(Selection::Day)
+        });
+        self.clickable(&self.trend.area, false, |widget, _, x, _| {
+            widget.trend.date_at(x).map(Selection::Day)
+        });
+    }
+
+    /// Makes `target` open the detail card for what `pick` finds under the
+    /// pointer. The item is picked when the button goes down, so a live
+    /// update that reorders rows before the release cannot change it.
+    /// `at_point` aligns the card with the click instead of all of `target`.
+    fn clickable(
+        self: &Rc<Self>,
+        target: &impl IsA<gtk::Widget>,
+        at_point: bool,
+        pick: impl Fn(&Widget, &Summary, f64, f64) -> Option<Selection> + 'static,
+    ) {
+        target.add_css_class("clickable");
+        target.set_cursor_from_name(Some("pointer"));
+        let click = gtk::GestureClick::builder()
+            .button(gtk::gdk::BUTTON_PRIMARY)
+            .build();
+        // The handlers must not hold `target`: it owns the controller.
+        let picked: Rc<RefCell<Option<(Selection, f64)>>> = Rc::default();
         let weak = Rc::downgrade(self);
-        on_click(&self.heatmap.area, move |x, y| {
-            let Some(widget) = weak.upgrade() else { return };
-            let summary = widget.last.borrow().clone();
-            if let (Some(summary), Some(date)) = (summary, widget.heatmap.date_at(x, y)) {
-                let area = widget.heatmap.area.clone();
-                widget.show_detail(Selection::Day(date), &area, Some(y), &summary);
-            }
+        let state = picked.clone();
+        click.connect_pressed(move |_, _, x, y| {
+            let selection = weak.upgrade().and_then(|widget| {
+                let summary = widget.last.borrow().clone()?;
+                pick(&widget, &summary, x, y)
+            });
+            state.replace(selection.map(|selection| (selection, y)));
         });
         let weak = Rc::downgrade(self);
-        on_click(&self.trend.area, move |x, _| {
-            let Some(widget) = weak.upgrade() else { return };
+        click.connect_released(move |gesture, _, _, _| {
+            let Some((selection, y)) = picked.take() else {
+                return;
+            };
+            let (Some(widget), Some(source)) = (weak.upgrade(), gesture.widget()) else {
+                return;
+            };
             let summary = widget.last.borrow().clone();
-            if let (Some(summary), Some(date)) = (summary, widget.trend.date_at(x)) {
-                let area = widget.trend.area.clone();
-                widget.show_detail(Selection::Day(date), &area, None, &summary);
+            if let Some(summary) = summary {
+                widget.show_detail(selection, &source, at_point.then_some(y), &summary);
             }
         });
+        target.add_controller(click);
     }
 
     /// Opens the detail card level with `source`, or with the point `y` in
@@ -704,17 +715,9 @@ impl Widget {
         let slot = SessionSlot::new();
         slot.root.set_visible(false);
         self.sessions_list.append(&slot.root);
-        let weak = Rc::downgrade(self);
-        let row = slot.root.clone();
-        on_click(&slot.root, move |_, _| {
-            let Some(widget) = weak.upgrade() else { return };
-            let Some(summary) = widget.last.borrow().clone() else {
-                return;
-            };
-            if let Some(session) = summary.sessions.get(index) {
-                let selection = Selection::Session(session.tool, session.id.clone());
-                widget.show_detail(selection, &row, None, &summary);
-            }
+        self.clickable(&slot.root, false, move |_, summary, _, _| {
+            let session = summary.sessions.get(index)?;
+            Some(Selection::Session(session.tool, session.id.clone()))
         });
         slots.push(slot);
     }

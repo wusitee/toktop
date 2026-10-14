@@ -14,15 +14,13 @@ use chrono::{DateTime, Local, NaiveDate};
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use toktop::aggregate::{DayRow, Split, Summary, Usage, project_label};
+use toktop::aggregate::{DayRow, Split, Summary, Usage, project_labels};
 use toktop::config::Anchor;
 use toktop::format;
 use toktop::model::Tool;
 
 /// Entries shown per list before the rest are summarized.
 const LIST_ROWS: usize = 6;
-/// Space between the main card and the detail card, in pixels.
-const GAP: i32 = 10;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Selection {
@@ -53,13 +51,11 @@ impl Detail {
             .css_classes(["detail"])
             .build();
         let (_, _, left, right) = anchor.edges();
-        let (side, offset) = if left && !right {
-            (gtk::PositionType::Right, GAP)
+        popover.set_position(if left && !right {
+            gtk::PositionType::Right
         } else {
-            (gtk::PositionType::Left, -GAP)
-        };
-        popover.set_position(side);
-        popover.set_offset(offset, 0);
+            gtk::PositionType::Left
+        });
         popover.set_parent(card);
         let selected: Rc<RefCell<Option<Selection>>> = Default::default();
         let state = selected.clone();
@@ -84,7 +80,9 @@ impl Detail {
             return;
         }
         self.selected.replace(Some(selection));
-        // Widget coordinates start inside the padding; the bounds include it.
+        // The card's full width, so the popover clears it also when GTK flips
+        // it to the other side; the gap is the popover's CSS margin. Widget
+        // coordinates start inside the padding; the bounds include it.
         let Some(card) = self
             .popover
             .parent()
@@ -92,14 +90,10 @@ impl Detail {
         else {
             return;
         };
-        let x = match self.popover.position() {
-            gtk::PositionType::Right => card.x() + card.width() - 1.0,
-            _ => card.x(),
-        } as i32;
         self.popover.set_pointing_to(Some(&gtk::gdk::Rectangle::new(
-            x,
+            card.x() as i32,
             y as i32,
-            1,
+            card.width() as i32,
             (height as i32).max(1),
         )));
         self.popover.popup();
@@ -141,6 +135,8 @@ fn clear(container: &gtk::Box) {
 struct Item {
     family: &'static str,
     name: String,
+    /// Full name, such as a project's path, for the tooltip.
+    full: String,
     tokens: u64,
 }
 
@@ -162,6 +158,7 @@ fn models(split: &Split) -> Vec<Item> {
         .map(|(model, tokens)| Item {
             family: model_family(model),
             name: model.clone(),
+            full: model.clone(),
             tokens: *tokens,
         })
         .collect()
@@ -174,24 +171,27 @@ fn tools(split: &Split) -> Vec<Item> {
         .map(|(tool, tokens)| Item {
             family: tool_family(*tool),
             name: tool.label().to_owned(),
+            full: tool.label().to_owned(),
             tokens: *tokens,
         })
         .collect()
 }
 
-/// Projects by display label: the summary's disambiguated one when the
-/// project has usage in the period, else the folder name.
-fn projects(split: &Split, summary: &Summary) -> Vec<Item> {
+/// Projects with labels that tell apart the ones in this list.
+fn projects(split: &Split) -> Vec<Item> {
+    let paths: Vec<&str> = split
+        .projects
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect();
     split
         .projects
         .iter()
-        .map(|(path, tokens)| Item {
+        .zip(project_labels(&paths))
+        .map(|((path, tokens), name)| Item {
             family: "project",
-            name: summary
-                .by_project
-                .iter()
-                .find(|row| &row.key == path)
-                .map_or_else(|| project_label(path), |row| row.label.clone()),
+            name,
+            full: path.clone(),
             tokens: *tokens,
         })
         .collect()
@@ -241,7 +241,7 @@ impl Info {
                     tiles: row_tiles(&row.usage, &row.split),
                     lists: vec![
                         ("TOOLS", tools(&row.split)),
-                        ("PROJECTS", projects(&row.split, summary)),
+                        ("PROJECTS", projects(&row.split)),
                     ],
                     notes: Vec::new(),
                 }
@@ -268,7 +268,7 @@ impl Info {
                     tiles: row_tiles(&row.usage, &row.split),
                     lists: vec![
                         ("MODELS", models(&row.split)),
-                        ("PROJECTS", projects(&row.split, summary)),
+                        ("PROJECTS", projects(&row.split)),
                     ],
                     notes: Vec::new(),
                 }
@@ -290,6 +290,7 @@ impl Info {
                     .map(|(model, tokens)| Item {
                         family: model_family(model),
                         name: model.clone(),
+                        full: model.clone(),
                         tokens: *tokens,
                     })
                     .collect();
@@ -340,7 +341,7 @@ impl Info {
                     lists: vec![
                         ("MODELS", models(split)),
                         ("TOOLS", tools(split)),
-                        ("PROJECTS", projects(split, summary)),
+                        ("PROJECTS", projects(split)),
                     ],
                     notes: Vec::new(),
                 }
@@ -476,7 +477,7 @@ impl Info {
                 set_family(&mark, item.family);
                 let name = ellipsized(&[]);
                 name.set_label(&item.name);
-                name.set_tooltip_text(Some(&item.name));
+                name.set_tooltip_text(Some(&item.full));
                 let amount = label(&["numeric"]);
                 amount.set_label(&format::tokens(item.tokens));
                 amount.set_width_chars(6);

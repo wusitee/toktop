@@ -287,6 +287,28 @@ pub fn project_label(project: &str) -> String {
         .to_owned()
 }
 
+/// Display labels for project paths: each path's basename, extended by the
+/// fewest parent components that tell it apart from the other paths.
+pub fn project_labels(paths: &[&str]) -> Vec<String> {
+    paths
+        .iter()
+        .map(|path| {
+            // Grow the suffix until no other project has the same path components.
+            let mut suffix = *path;
+            for (index, _) in path.rmatch_indices('/') {
+                suffix = &path[index + 1..];
+                if !paths.iter().any(|other| {
+                    other != path && (*other == suffix || other.ends_with(&format!("/{suffix}")))
+                }) {
+                    break;
+                }
+                suffix = path;
+            }
+            suffix.to_owned()
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct Group<'a> {
     usage: Usage,
@@ -564,24 +586,14 @@ pub fn summarize<'a>(
     summary.by_tool = tools;
     summary.by_model = sorted_rows(by_model);
     summary.by_project = sorted_rows(by_project);
-    let paths: Vec<_> = summary
+    let paths: Vec<&str> = summary
         .by_project
         .iter()
-        .map(|row| row.key.clone())
+        .map(|row| row.key.as_str())
         .collect();
-    for row in &mut summary.by_project {
-        // Grow the suffix until no other project has the same path components.
-        let mut suffix = row.key.as_str();
-        for (index, _) in row.key.rmatch_indices('/') {
-            suffix = &row.key[index + 1..];
-            if !paths.iter().any(|other| {
-                other != &row.key && (other == suffix || other.ends_with(&format!("/{suffix}")))
-            }) {
-                break;
-            }
-            suffix = &row.key;
-        }
-        row.label = suffix.to_owned();
+    let labels = project_labels(&paths);
+    for (row, label) in summary.by_project.iter_mut().zip(labels) {
+        row.label = label;
     }
     summary.sessions.sort_by(|a, b| {
         b.last_activity

@@ -232,7 +232,8 @@ popover.detail > contents {
   border-radius: 16px;
   padding: 14px 18px 12px;
   box-shadow: none;
-  margin: 0;
+  /* The gap to the main card, on whichever side the card opens. */
+  margin: 0 10px;
   font-family: monospace;
   font-size: 12px;
 }
