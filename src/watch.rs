@@ -178,8 +178,9 @@ impl Watcher {
         }
     }
 
-    /// Watches the nearest existing directory of `path` and its ancestors.
-    /// Returns it, or `None` when registration failed.
+    /// Watches the nearest existing directory of `path` and its ancestors
+    /// and returns it; `None` when none could be checked. A failed watch is
+    /// recorded in `failure`, not returned.
     fn watch_nearest(&mut self, path: &Path, tree: bool) -> Option<PathBuf> {
         let mut candidate = Some(path);
         while let Some(dir) = candidate {
