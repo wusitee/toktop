@@ -13,6 +13,7 @@
 @define-color toktop_gemini #4c8df6;
 @define-color toktop_deepseek #4d6bfe;
 @define-color toktop_pi #c792ea;
+@define-color toktop_kimi #22b8cf;
 @define-color toktop_other #8b949e;
 
 window.toktop {
@@ -70,6 +71,7 @@ window.toktop.windowed .card {
 .dot.gemini { background-color: @toktop_gemini; }
 .dot.deepseek { background-color: @toktop_deepseek; }
 .dot.pi { background-color: @toktop_pi; }
+.dot.kimi { background-color: @toktop_kimi; }
 .dot.project { background-color: alpha(@toktop_fg, 0.35); }
 
 .live-dot {

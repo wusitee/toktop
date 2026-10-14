@@ -72,6 +72,7 @@ pub fn classify(path: &Path) -> Option<Tool> {
             Tool::Codex => name.starts_with("rollout-") && name.ends_with(".jsonl"),
             Tool::Antigravity => name.ends_with(".db"),
             Tool::Pi => name.ends_with(".jsonl"),
+            Tool::Kimi => name == "wire.jsonl",
         };
         return matches.then_some(tool);
     }
@@ -217,7 +218,7 @@ impl Store {
             let path = source_path(&path);
             let known = self.files.get(&path).map(|entry| entry.tool);
             let Some(tool) = classify(&path).or(known) else {
-                titles_dirty |= paths::title_sources(&self.tools).contains(&path);
+                titles_dirty |= paths::is_title_source(&self.tools, &path);
                 continue;
             };
             if !self.tools.contains(&tool) {
@@ -270,6 +271,9 @@ impl Store {
         }
         if self.tools.contains(&Tool::Codex) {
             titles.extend(codex_titles(&paths::codex_session_index()));
+        }
+        if self.tools.contains(&Tool::Kimi) {
+            titles.extend(crate::parse::kimi::titles(&paths::kimi_sessions()));
         }
         let changed = titles != self.titles;
         self.titles = titles;

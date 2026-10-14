@@ -45,7 +45,15 @@ pub fn source_roots(tool: Tool) -> Vec<PathBuf> {
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
                 .join("sessions")
         })],
+        Tool::Kimi => vec![kimi_sessions()],
     }
+}
+
+/// Kimi Code's session directory.
+pub fn kimi_sessions() -> PathBuf {
+    env_dir("KIMI_CODE_HOME")
+        .unwrap_or_else(|| home().join(".kimi-code"))
+        .join("sessions")
 }
 
 /// Antigravity IDE and CLI data directories.
@@ -75,6 +83,15 @@ pub fn title_sources(tools: &[Tool]) -> Vec<PathBuf> {
         );
     }
     sources
+}
+
+/// Whether `path` holds session titles for `tools`: one of
+/// [`title_sources`], or a Kimi Code session's `state.json`.
+pub fn is_title_source(tools: &[Tool], path: &std::path::Path) -> bool {
+    title_sources(tools).iter().any(|source| source == path)
+        || (tools.contains(&Tool::Kimi)
+            && path.file_name().is_some_and(|name| name == "state.json")
+            && path.starts_with(kimi_sessions()))
 }
 
 pub fn config_home() -> PathBuf {

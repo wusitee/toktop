@@ -10,7 +10,7 @@ A tool's model id is resolved in this order, trying aliases for each candidate:
 
 1. Normalize dotted Claude versions (`claude-sonnet-4.6` → `claude-sonnet-4-6`) and resolve tool machine-id aliases from tokscale's static map (`MODEL_PLACEHOLDER_M35` → `claude-sonnet-4-6`), in `src/pricing/aliases.rs`.
 2. The full id, so `azure/…` keeps Azure's price.
-3. The bare name, preferring first-party provider entries.
+3. The bare name, preferring first-party provider entries (OpenAI, Anthropic, Gemini, xAI, Vertex AI, DeepSeek, Moonshot).
 4. The id with trailing `-suffix` segments dropped (`claude-opus-4-6-thinking` → `claude-opus-4-6`). Gemini 3 and 3.1 Pro also try the catalog's `-preview` spelling.
 
 When a price table is available, models without a price count as zero cost and are listed as unpriced. Without a price table, costs are hidden and individual unpriced-model warnings are suppressed.

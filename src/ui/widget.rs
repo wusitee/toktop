@@ -80,6 +80,8 @@ fn model_family(model: &str) -> &'static str {
         "gemini"
     } else if name.contains("deepseek") {
         "deepseek"
+    } else if model.contains("kimi") {
+        "kimi"
     } else if name.starts_with("gpt")
         || name.starts_with("codex")
         || name.starts_with("chatgpt")
@@ -97,6 +99,7 @@ fn tool_family(tool: Tool) -> &'static str {
         Tool::Codex => "openai",
         Tool::Antigravity => "gemini",
         Tool::Pi => "pi",
+        Tool::Kimi => "kimi",
     }
 }
 
