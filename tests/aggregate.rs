@@ -262,9 +262,30 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
     assert_eq!(summary.sessions.len(), 1);
     let row = &summary.sessions[0];
     assert_eq!((row.id.as_str(), row.subagents), ("root", 2));
-    assert_eq!(row.models, ["gpt-6-luna", "gpt-6.1-sol"]);
+    assert_eq!(
+        row.models,
+        [
+            ("gpt-6-luna".to_owned(), 5320),
+            ("gpt-6.1-sol".to_owned(), 110)
+        ]
+    );
     assert_eq!(row.usage.requests, 3);
-    assert_eq!(row.last_activity, ms(today, 11));
+    assert_eq!(
+        (row.first_activity, row.last_activity),
+        (ms(today, 9), ms(today, 11))
+    );
+    // Splits count subagents as part of their root session.
+    let luna = summary
+        .by_model
+        .iter()
+        .find(|row| row.key == "gpt-6-luna")
+        .unwrap();
+    assert_eq!(luna.split.sessions, 1);
+    assert_eq!(luna.split.tools, [(Tool::Codex, 5320)]);
+    assert_eq!(luna.split.projects, [("/work/app".to_owned(), 5320)]);
+    let day = summary.daily.last().unwrap();
+    assert_eq!(day.date, today);
+    assert_eq!((day.split.sessions, day.split.models.len()), (1, 2));
     assert_eq!(summary.total.speed(), Some(100.0));
     assert_eq!(summary.streak_days, 2);
 
@@ -297,6 +318,7 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
     let day = |date| aggregate::DayRow {
         date,
         usage: aggregate::Usage::default(),
+        split: aggregate::Split::default(),
     };
     let daily = [day(today - chrono::Days::new(2)), day(yesterday)];
     assert_eq!(aggregate::streak(&daily, today), 2);

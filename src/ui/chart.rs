@@ -102,23 +102,9 @@ impl Heatmap {
         let state = data.clone();
         area.connect_query_tooltip(move |area, x, y, _keyboard, tooltip| {
             let data = state.borrow();
-            let Some(today) = data.today else {
+            let Some(date) = heatmap_date(area, &data, x as f64, y as f64) else {
                 return false;
             };
-            let grid = Grid::new(area.width() as f64, area.height() as f64);
-            let pitch = grid.cell + grid.gap;
-            let (column, row) = (
-                ((x as f64 - grid.left) / pitch).floor() as i64,
-                (y as f64 / pitch).floor() as i64,
-            );
-            if !(0..grid.weeks).contains(&column) || !(0..7).contains(&row) {
-                return false;
-            }
-            let monday = week_start(today) - Days::new(((grid.weeks - 1 - column) * 7) as u64);
-            let date = monday + Days::new(row as u64);
-            if date > today {
-                return false;
-            }
             let day = match data.days.binary_search_by_key(&date, |day| day.date) {
                 Ok(index) => data.days[index].clone(),
                 Err(_) => Day {
@@ -133,6 +119,11 @@ impl Heatmap {
         Heatmap { area, data }
     }
 
+    /// Day of the cell at a point in the chart, if any.
+    pub fn date_at(&self, x: f64, y: f64) -> Option<NaiveDate> {
+        heatmap_date(&self.area, &self.data.borrow(), x, y)
+    }
+
     pub fn set(&self, today: NaiveDate, days: Vec<Day>) {
         let data = HeatmapData {
             today: Some(today),
@@ -143,6 +134,22 @@ impl Heatmap {
             self.area.queue_draw();
         }
     }
+}
+
+fn heatmap_date(area: &gtk::DrawingArea, data: &HeatmapData, x: f64, y: f64) -> Option<NaiveDate> {
+    let today = data.today?;
+    let grid = Grid::new(area.width() as f64, area.height() as f64);
+    let pitch = grid.cell + grid.gap;
+    let (column, row) = (
+        ((x - grid.left) / pitch).floor() as i64,
+        (y / pitch).floor() as i64,
+    );
+    if !(0..grid.weeks).contains(&column) || !(0..7).contains(&row) {
+        return None;
+    }
+    let monday = week_start(today) - Days::new(((grid.weeks - 1 - column) * 7) as u64);
+    let date = monday + Days::new(row as u64);
+    (date <= today).then_some(date)
 }
 
 fn draw_heatmap(
@@ -251,15 +258,19 @@ impl Trend {
         let data = days.clone();
         area.connect_query_tooltip(move |area, x, _y, _keyboard, tooltip| {
             let days = data.borrow();
-            if days.len() < 2 || area.width() == 0 {
+            let Some(index) = trend_index(area, days.len(), x as f64) else {
                 return false;
-            }
-            let step = area.width() as f64 / (days.len() - 1) as f64;
-            let index = ((x as f64 / step).round() as usize).min(days.len() - 1);
+            };
             tooltip.set_text(Some(&tooltip_text(&days[index])));
             true
         });
         Trend { area, days }
+    }
+
+    /// Day of the point nearest to `x`.
+    pub fn date_at(&self, x: f64) -> Option<NaiveDate> {
+        let days = self.days.borrow();
+        trend_index(&self.area, days.len(), x).map(|index| days[index].date)
     }
 
     pub fn set(&self, days: Vec<Day>) {
@@ -268,6 +279,14 @@ impl Trend {
             self.area.queue_draw();
         }
     }
+}
+
+fn trend_index(area: &gtk::DrawingArea, len: usize, x: f64) -> Option<usize> {
+    if len < 2 || area.width() == 0 {
+        return None;
+    }
+    let step = area.width() as f64 / (len - 1) as f64;
+    Some(((x / step).round().max(0.0) as usize).min(len - 1))
 }
 
 fn draw_trend(

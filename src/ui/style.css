@@ -202,3 +202,63 @@ progressbar.low progress {
 .trend {
   color: @toktop_accent;
 }
+
+.dot.day { background-color: @toktop_accent; }
+
+.row.clickable:hover {
+  background-color: alpha(@toktop_fg, 0.05);
+  border-radius: 6px;
+}
+
+button.icon {
+  min-height: 0;
+  min-width: 0;
+  padding: 0 2px;
+  background: none;
+  box-shadow: none;
+  color: @toktop_dim;
+}
+
+button.icon:hover,
+button.icon:checked {
+  color: @toktop_fg;
+}
+
+/* Detail card beside the widget. */
+popover.detail > contents {
+  background-color: @toktop_bg;
+  color: @toktop_fg;
+  border: 1px solid @toktop_line;
+  border-radius: 16px;
+  padding: 14px 18px 12px;
+  box-shadow: none;
+  margin: 0;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.detail-kind {
+  letter-spacing: 1px;
+  margin-bottom: 6px;
+}
+
+.detail-dot {
+  margin-top: 6px;
+}
+
+.detail-title {
+  font-size: 14px;
+  font-weight: bold;
+}
+
+.detail-hero {
+  font-family: sans-serif;
+  font-size: 28px;
+  font-weight: 300;
+  font-feature-settings: "tnum";
+  margin-top: 8px;
+}
+
+.detail-note {
+  margin-top: 4px;
+}

@@ -11,7 +11,7 @@ toktop reads the local logs of AI coding tools, turns them into usage events and
 | `toktop-watch` | Blocks on inotify and forwards changed paths to the worker. |
 | ksni service, `toktop-tray` | Serve the tray icon over D-Bus and push tooltip updates; tray clicks and menu items are forwarded to the GTK main thread. Present only when the tray is registered. |
 
-The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The widget builds a fixed number of row slots once and only changes their text and visibility on update; it never rebuilds widgets. This keeps per-update CPU low.
+The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The widget builds a fixed number of row slots once and only changes their text and visibility on update; the sessions list adds slots the first time it is expanded. The detail card is the exception: while open, it is rebuilt from each summary, and closed, it holds no widgets. This keeps per-update CPU low.
 
 ## Application lifecycle
 
@@ -36,13 +36,13 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 |---|---|
 | `src/parse/` | One parser per tool, plus a minimal protobuf reader for Antigravity. |
 | `src/store.rs` | Index of every source file and its parsed session. Discovers files, re-reads changed ones and loads tool-side title indexes. |
-| `src/aggregate.rs` | Builds a `Summary` for a period: totals, breakdowns by tool, model, project and session (with subagents grouped), daily history, streak, live token rate and average speed. |
+| `src/aggregate.rs` | Builds a `Summary` for a period: totals, breakdowns by tool, model, project and session (with subagents grouped), daily history, streak, live token rate and average speed. Each breakdown row and day carries a `Split`: its tokens by model, tool and project, and its session count. |
 | `src/pricing.rs`, `src/pricing/aliases.rs` | LiteLLM price table, reduced and cached; tool model aliases; cost per request. |
 | `src/model.rs` | Shared types: `Tool`, `Tokens`, `Event`, `Session`, rate limits. |
 | `src/paths.rs` | Source and cache locations, with the tools' environment overrides. |
 | `src/watch.rs` | Recursive inotify watcher. |
 | `src/worker.rs` | Worker thread loop. |
-| `src/ui/` | Application shell (`mod.rs`), the card (`widget.rs`, `style.css`), heatmap and trend charts, settings window, layer-shell bindings, Hyprland reserved-space query and tray icon. |
+| `src/ui/` | Application shell (`mod.rs`), the card (`widget.rs`, `style.css`), the detail card (`detail.rs`), heatmap and trend charts, settings window, layer-shell bindings, Hyprland reserved-space query and tray icon. |
 | `src/config.rs` | Settings file. |
 
 ## Incremental reads

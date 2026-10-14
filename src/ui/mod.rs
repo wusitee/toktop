@@ -6,6 +6,7 @@
 //! widgets in memory.
 
 mod chart;
+mod detail;
 mod hyprland;
 mod layer;
 mod settings;
