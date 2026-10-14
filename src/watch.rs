@@ -158,7 +158,30 @@ impl Watcher {
         }
     }
 
+    /// Watches `path`, or its nearest existing ancestor until it appears.
     fn ensure_dir(&mut self, path: &Path, tree: bool) {
+        // A directory created after the existence check but before its
+        // parent's watch is never reported, so check again once watched.
+        // Each retry watches a deeper directory, unless one keeps vanishing.
+        for _ in path.ancestors() {
+            let Some(dir) = self.watch_nearest(path, tree) else {
+                return;
+            };
+            if dir == path
+                || !path
+                    .ancestors()
+                    .find(|child| child.parent() == Some(dir.as_path()))
+                    .is_some_and(Path::exists)
+            {
+                return;
+            }
+        }
+    }
+
+    /// Watches the nearest existing directory of `path` and its ancestors
+    /// and returns it; `None` when none could be checked. A failed watch is
+    /// recorded in `failure`, not returned.
+    fn watch_nearest(&mut self, path: &Path, tree: bool) -> Option<PathBuf> {
         let mut candidate = Some(path);
         while let Some(dir) = candidate {
             match fs::metadata(dir) {
@@ -175,20 +198,21 @@ impl Watcher {
                             },
                         );
                     }
-                    return;
+                    return Some(dir.to_path_buf());
                 }
                 Ok(_) => {
                     self.failed(dir, io::Error::from(io::ErrorKind::NotADirectory));
-                    return;
+                    return None;
                 }
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => {
                     self.failed(dir, error);
-                    return;
+                    return None;
                 }
             }
             candidate = dir.parent();
         }
+        None
     }
 
     fn reconcile(&mut self, emit: &mut impl FnMut(Change)) {
