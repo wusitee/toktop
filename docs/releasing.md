@@ -11,7 +11,7 @@ Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.
    ```
 
 3. The workflow fails unless the tag matches the `Cargo.toml` version. It runs the tests, builds a release binary in the Arch Linux container used by CI, and creates a draft GitHub release with generated notes and these assets:
-   - `toktop-<version>-x86_64-linux.tar.gz`: the binary, `LICENSE`, `README.md`, the desktop entries and the icons under `data/`
+   - `toktop-<version>-x86_64-linux.tar.gz`: the binary, `LICENSE`, `README.md`, `docs/`, and the desktop entries and icons under `data/`
    - `toktop-<version>-x86_64-linux.tar.gz.sha256`: its SHA-256 checksum
 4. Edit the draft's notes and publish it.
 
