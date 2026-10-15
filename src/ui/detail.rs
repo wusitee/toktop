@@ -6,15 +6,16 @@
 //! its button or by clicking the same item again, so clicking another item
 //! switches it directly.
 
+use super::chart;
 use super::widget::{
-    dot, ellipsized, hbox, label, model_family, section, section_header, set_family, tool_family,
-    vbox,
+    Count, dot, ellipsized, hbox, label, model_family, section, section_header, set_family,
+    tool_family, vbox,
 };
 use chrono::{DateTime, Local, NaiveDate};
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use toktop::aggregate::{DayRow, Split, Summary, Usage, project_labels};
+use toktop::aggregate::{DayRow, SPEED_DAYS, Split, Summary, Usage, project_labels};
 use toktop::config::Anchor;
 use toktop::format;
 use toktop::model::Tool;
@@ -38,6 +39,8 @@ pub struct Detail {
     content: gtk::Box,
     scroll: gtk::ScrolledWindow,
     selected: Rc<RefCell<Option<Selection>>>,
+    /// Whether the hero shows the exact count; kept across renders.
+    exact: Rc<Cell<bool>>,
 }
 
 impl Detail {
@@ -95,6 +98,7 @@ impl Detail {
             content,
             scroll,
             selected,
+            exact: Rc::default(),
         }
     }
 
@@ -149,7 +153,7 @@ impl Detail {
         };
         self.kind.set_label(&info.kind);
         clear(&self.content);
-        info.build(&self.content, summary.prices_available);
+        info.build(&self.content, summary.prices_available, &self.exact);
         true
     }
 }
@@ -182,6 +186,8 @@ struct Info {
     usage: Usage,
     tiles: Vec<(&'static str, String)>,
     lists: Vec<(&'static str, Vec<Item>)>,
+    /// Daily output speeds over the last [`SPEED_DAYS`] days.
+    daily_speed: Vec<(NaiveDate, f64)>,
     notes: Vec<String>,
 }
 
@@ -277,6 +283,7 @@ impl Info {
                         ("TOOLS", tools(&row.split)),
                         ("PROJECTS", projects(&row.split)),
                     ],
+                    daily_speed: row.daily_speed.clone(),
                     notes: Vec::new(),
                 }
             }
@@ -289,6 +296,7 @@ impl Info {
                     usage: row.usage.clone(),
                     tiles: row_tiles(&row.usage, &row.split),
                     lists: vec![("MODELS", models(&row.split)), ("TOOLS", tools(&row.split))],
+                    daily_speed: Vec::new(),
                     notes: vec![row.key.clone()],
                 }
             }
@@ -304,6 +312,7 @@ impl Info {
                         ("MODELS", models(&row.split)),
                         ("PROJECTS", projects(&row.split)),
                     ],
+                    daily_speed: Vec::new(),
                     notes: Vec::new(),
                 }
             }
@@ -349,6 +358,7 @@ impl Info {
                     usage: session.usage.clone(),
                     tiles,
                     lists: vec![("MODELS", models)],
+                    daily_speed: Vec::new(),
                     notes,
                 }
             }
@@ -377,6 +387,7 @@ impl Info {
                         ("TOOLS", tools(split)),
                         ("PROJECTS", projects(split)),
                     ],
+                    daily_speed: Vec::new(),
                     notes: Vec::new(),
                 }
             }
@@ -384,7 +395,7 @@ impl Info {
         Some(info)
     }
 
-    fn build(self, card: &gtk::Box, prices_available: bool) {
+    fn build(self, card: &gtk::Box, prices_available: bool, exact: &Rc<Cell<bool>>) {
         let usage = &self.usage;
         let total = usage.tokens.total();
 
@@ -405,9 +416,10 @@ impl Info {
         header.append(&title);
         card.append(&header);
 
-        let hero = label(&["detail-hero"]);
-        hero.set_label(&format::grouped(total));
-        card.append(&hero);
+        let hero = Count::new("detail-hero", exact.clone());
+        hero.label.set_halign(gtk::Align::Start);
+        hero.set(total);
+        card.append(&hero.label);
         let summary = label(&["dim"]);
         summary.set_label(&format!(
             "{} · {} requests",
@@ -479,6 +491,33 @@ impl Info {
             composition.append(&row);
         }
         card.append(&composition);
+
+        if !self.daily_speed.is_empty() {
+            let speed = vbox(6);
+            speed.add_css_class("section");
+            let (low, high) = self
+                .daily_speed
+                .iter()
+                .fold((f64::MAX, 0.0f64), |(low, high), (_, speed)| {
+                    (low.min(*speed), high.max(*speed))
+                });
+            let range = label(&["caption"]);
+            range.set_label(&if self.daily_speed.len() > 1 {
+                format!("{:.0}–{}", low, format::speed(high))
+            } else {
+                format::speed(high)
+            });
+            speed.append(&section_header(
+                &section(&format!("SPEED · {SPEED_DAYS}D")),
+                &range,
+            ));
+            speed.append(&chart::speed_line(
+                Local::now().date_naive(),
+                SPEED_DAYS,
+                self.daily_speed,
+            ));
+            card.append(&speed);
+        }
 
         for (title, items) in &self.lists {
             if items.is_empty() {

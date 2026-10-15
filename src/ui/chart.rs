@@ -1,4 +1,5 @@
-//! Cairo charts: a weekly activity heatmap and a daily trend line.
+//! Cairo charts: a weekly activity heatmap, a daily trend line and a daily
+//! speed line.
 //!
 //! Both draw in their widget's CSS `color`, so a user stylesheet can
 //! restyle them like any other text.
@@ -350,6 +351,73 @@ fn draw_trend(
     let (x, y) = point(last, days[last].tokens);
     cr.arc(x - 2.5, y, 2.5, 0.0, std::f64::consts::TAU);
     let _ = cr.fill();
+}
+
+/// Daily output speeds as a line with a mark per day, over the `days` days
+/// ending at `last`; days without timed requests are skipped. Built once per
+/// detail card render, so it keeps its points instead of updating.
+pub fn speed_line(last: NaiveDate, days: u64, points: Vec<(NaiveDate, f64)>) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::builder()
+        .content_height(40)
+        .hexpand(true)
+        .has_tooltip(true)
+        .css_classes(["trend"])
+        .build();
+    let first = last - Days::new(days.saturating_sub(1));
+    let span = days.saturating_sub(1).max(1) as f64;
+    // Fraction of the width at which a day is drawn.
+    let position = move |date: NaiveDate| (date - first).num_days() as f64 / span;
+    let points = Rc::new(points);
+    let data = points.clone();
+    area.set_draw_func(move |area, cr, width, height| {
+        let (width, height) = (width as f64, height as f64);
+        let Some(max) = data.iter().map(|(_, speed)| *speed).reduce(f64::max) else {
+            return;
+        };
+        let max = max.max(f64::EPSILON);
+        let (top, bottom, inset) = (3.0, height - 3.0, 3.0);
+        let point = |(date, speed): &(NaiveDate, f64)| {
+            (
+                inset + position(*date) * (width - 2.0 * inset),
+                bottom - speed / max * (bottom - top),
+            )
+        };
+        let color = area.color();
+        set_source(cr, &color, 0.12);
+        cr.set_line_width(1.0);
+        cr.move_to(0.0, bottom + 0.5);
+        cr.line_to(width, bottom + 0.5);
+        let _ = cr.stroke();
+        set_source(cr, &color, 1.0);
+        cr.set_line_width(1.5);
+        cr.set_line_join(gtk::cairo::LineJoin::Round);
+        for day in data.iter() {
+            let (x, y) = point(day);
+            cr.line_to(x, y);
+        }
+        let _ = cr.stroke();
+        for day in data.iter() {
+            let (x, y) = point(day);
+            cr.arc(x, y, 2.0, 0.0, std::f64::consts::TAU);
+            let _ = cr.fill();
+        }
+    });
+    area.connect_query_tooltip(move |area, x, _y, _keyboard, tooltip| {
+        let width = area.width() as f64;
+        let Some((date, speed)) = points.iter().min_by(|a, b| {
+            let distance = |date| (position(date) * width - x as f64).abs();
+            distance(a.0).total_cmp(&distance(b.0))
+        }) else {
+            return false;
+        };
+        tooltip.set_text(Some(&format!(
+            "{}\n{}",
+            date.format("%a %b %-d, %Y"),
+            format::speed(*speed)
+        )));
+        true
+    });
+    area
 }
 
 fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64) {

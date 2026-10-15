@@ -193,6 +193,10 @@ pub struct Row {
     pub label: String,
     pub usage: Usage,
     pub split: Split,
+    /// Average output speed per local day over the [`SPEED_DAYS`] days
+    /// ending today, oldest first, for days with timed requests. Filled for
+    /// model rows only.
+    pub daily_speed: Vec<(NaiveDate, f64)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -249,6 +253,8 @@ pub struct Summary {
 }
 
 pub const RATE_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// Days covered by [`Row::daily_speed`], ending today.
+pub const SPEED_DAYS: u64 = 30;
 
 fn local_date(ts: i64) -> NaiveDate {
     DateTime::from_timestamp_millis(ts)
@@ -264,6 +270,7 @@ fn sorted_rows(map: HashMap<&str, Acc>) -> Vec<Row> {
             label: key.to_owned(),
             usage: acc.usage,
             split: acc.split.finish(),
+            daily_speed: Vec::new(),
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -372,6 +379,8 @@ pub fn summarize<'a>(
     let mut by_model: HashMap<&str, Acc> = HashMap::new();
     let mut by_project: HashMap<&str, Acc> = HashMap::new();
     let mut daily: HashMap<NaiveDate, Acc> = HashMap::new();
+    let speed_start = today - Days::new(SPEED_DAYS - 1);
+    let mut model_days: HashMap<(&str, NaiveDate), Usage> = HashMap::new();
     let mut unpriced: HashSet<String> = HashSet::new();
     let mut price_cache: HashMap<&str, Option<Price>> = HashMap::new();
     let mut recent_tokens = 0u64;
@@ -469,10 +478,17 @@ pub fn summarize<'a>(
                 project,
                 root: root_id,
             };
+            let date = local_date(event.ts);
             daily
-                .entry(local_date(event.ts))
+                .entry(date)
                 .or_default()
                 .add(&at, &tokens, cost, duration);
+            if duration > 0 && date >= speed_start && date <= today {
+                model_days
+                    .entry((model, date))
+                    .or_default()
+                    .add(&tokens, cost, duration);
+            }
             if now_ms - event.ts <= RATE_WINDOW_MS && event.ts <= now_ms {
                 recent_tokens = recent_tokens.saturating_add(tokens.total());
             }
@@ -585,6 +601,18 @@ pub fn summarize<'a>(
     });
     summary.by_tool = tools;
     summary.by_model = sorted_rows(by_model);
+    let mut speeds: HashMap<&str, Vec<(NaiveDate, f64)>> = HashMap::new();
+    for ((model, date), usage) in model_days {
+        if let Some(speed) = usage.speed() {
+            speeds.entry(model).or_default().push((date, speed));
+        }
+    }
+    for row in &mut summary.by_model {
+        if let Some(mut days) = speeds.remove(row.key.as_str()) {
+            days.sort_by_key(|(date, _)| *date);
+            row.daily_speed = days;
+        }
+    }
     summary.by_project = sorted_rows(by_project);
     let paths: Vec<&str> = summary
         .by_project
