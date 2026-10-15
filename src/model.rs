@@ -11,15 +11,17 @@ pub enum Tool {
     Antigravity,
     Pi,
     Kimi,
+    Dsh,
 }
 
 impl Tool {
-    pub const ALL: [Tool; 5] = [
+    pub const ALL: [Tool; 6] = [
         Tool::ClaudeCode,
         Tool::Codex,
         Tool::Antigravity,
         Tool::Pi,
         Tool::Kimi,
+        Tool::Dsh,
     ];
 
     /// Short name used in the config file.
@@ -30,6 +32,7 @@ impl Tool {
             Tool::Antigravity => "antigravity",
             Tool::Pi => "pi",
             Tool::Kimi => "kimi-code",
+            Tool::Dsh => "dsh",
         }
     }
 
@@ -44,6 +47,7 @@ impl Tool {
             Tool::Antigravity => "Antigravity",
             Tool::Pi => "Pi",
             Tool::Kimi => "Kimi Code",
+            Tool::Dsh => "dsh",
         }
     }
 }

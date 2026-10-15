@@ -1202,3 +1202,113 @@ fn kimi_reads_agent_wires_titles_and_response_time() {
     assert_eq!(titles.len(), 1);
     assert_eq!(titles["k1"], "Kimi work");
 }
+
+/// One Zstandard frame storing `text` in a single raw block.
+fn zstd_frame(text: &str) -> Vec<u8> {
+    let mut frame = 0xFD2F_B528_u32.to_le_bytes().to_vec();
+    // Single segment, 4-byte content size, no checksum.
+    frame.push(0xA0);
+    frame.extend((text.len() as u32).to_le_bytes());
+    // Last raw block.
+    frame.extend(&((text.len() as u32) << 3 | 1).to_le_bytes()[..3]);
+    frame.extend(text.as_bytes());
+    frame
+}
+
+#[test]
+fn dsh_reads_zstd_frames_skipping_fork_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.jsonl.zstd");
+    let header = zstd_frame(concat!(
+        r#"{"type":"session","version":0,"id":"session-c","createdAt":1790848800000,"cwd":"/work/app","parentSession":"session-p","seedLength":3,"origin":"subagent","delegationDepth":1}"#,
+        "\n",
+    ));
+    let batch = zstd_frame(concat!(
+        // Copied from the parent: not this session's prompt or usage.
+        r#"{"type":"user/message","seq":0,"time":1790848700000,"data":{"content":[{"type":"text","text":"parent task"}],"source":{"kind":"user"},"role":"user"}}"#,
+        "\n",
+        // The route stays in effect for the child.
+        r#"{"type":"request/context","seq":1,"time":1790848700050,"data":{"provider":"deepseek-official","model":"deepseek-v4-pro","contextWindow":1000000}}"#,
+        "\n",
+        r#"{"type":"assistant/message","seq":2,"time":1790848701000,"data":{"turn":1,"step":1,"message":{"id":"m0","source":{"kind":"model","model":"deepseek-v4-pro"}},"usage":{"inputTokens":9,"outputTokens":9,"cacheReadTokens":9,"reasoningTokens":0}}}"#,
+        "\n",
+        // Plugin notices are not prompts.
+        r#"{"type":"user/message","seq":3,"time":1790848800001,"data":{"content":[{"type":"text","text":"policy changed"}],"source":{"kind":"plugin"},"role":"user"}}"#,
+        "\n",
+        r#"{"type":"user/message","seq":4,"time":1790848800002,"data":{"content":[{"type":"text","text":"Review  the\ndiff"}],"source":{"kind":"user"},"role":"user"}}"#,
+        "\n",
+        r#"{"type":"step/start","seq":6,"time":1790848801000,"data":{"turn":1,"step":1}}"#,
+        "\n",
+        // The message's usage replaces the step's sample.
+        r#"{"type":"assistant/chunk","seq":7,"time":1790848802900,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"reasoningTokens":0}}}}"#,
+        "\n",
+        r#"{"type":"assistant/message","seq":8,"time":1790848803000,"data":{"turn":1,"step":1,"message":{"id":"m1","source":{"kind":"model","model":"deepseek-v4-pro"}},"usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":7,"reasoningTokens":20}}}"#,
+        "\n",
+        r#"{"type":"step/end","seq":9,"time":1790848803001,"data":{"turn":1,"step":1}}"#,
+        "\n",
+        // An attempt that fails after reporting usage still counts, under
+        // its own model, even when the retry reports no usage.
+        r#"{"type":"step/start","seq":10,"time":1790848804000,"data":{"turn":1,"step":2}}"#,
+        "\n",
+        r#"{"type":"assistant/chunk","seq":11,"time":1790848805000,"data":{"turn":1,"step":2,"chunk":{"type":"usage","usage":{"inputTokens":30,"outputTokens":3,"cacheReadTokens":0,"reasoningTokens":0}}}}"#,
+        "\n",
+        r#"{"type":"request/context","seq":12,"time":1790848805100,"data":{"provider":"deepseek-official","model":"deepseek-v4-flash","contextWindow":1000000}}"#,
+        "\n",
+        r#"{"type":"assistant/message","seq":13,"time":1790848806000,"data":{"turn":1,"step":2,"message":{"id":"m2","source":{"kind":"model","model":"deepseek-v4-flash"}}}}"#,
+        "\n",
+    ));
+    let compaction = zstd_frame(concat!(
+        r#"{"type":"compaction/start","seq":14,"time":1790848810000,"data":{"compactionId":"c1"}}"#,
+        "\n",
+        r#"{"type":"compaction/summary","seq":15,"time":1790848814000,"data":{"compactionId":"c1","model":"deepseek-v4-flash","usage":{"inputTokens":500,"outputTokens":40,"cacheReadTokens":0,"reasoningTokens":0}}}"#,
+        "\n",
+        r#"{"type":"session/title","seq":16,"time":1790848815000,"data":{"title":" Diff review ","source":{"kind":"llm","model":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
+        "\n",
+    ));
+    let mut bytes = [header, batch].concat();
+    // The last frame is still being written.
+    bytes.extend(&compaction[..10]);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let (mut session, cursor) = parse::parse_full(Tool::Dsh, &path).unwrap();
+    let mut cursor = cursor.unwrap();
+    assert_eq!(session.id, "session-c");
+    assert_eq!(session.parent.as_deref(), Some("session-p"));
+    assert_eq!(session.project.as_deref(), Some("/work/app"));
+    assert_eq!(session.prompt.as_deref(), Some("Review the diff"));
+    assert_eq!(session.events.len(), 2);
+    let event = &session.events[0];
+    assert_eq!(
+        event.tokens,
+        Tokens {
+            input: 100,
+            output: 30,
+            cache_read: 900,
+            cache_write: 7,
+            cache_write_1h: 0,
+            reasoning: 20,
+        }
+    );
+    assert_eq!(event.duration_ms, 2000);
+    assert_eq!(event.key.as_deref(), Some("message:m1"));
+    let failed = &session.events[1];
+    assert_eq!(failed.tokens.total(), 33);
+    assert_eq!(session.models[failed.model as usize], "deepseek-v4-pro");
+    assert_eq!(failed.duration_ms, 1000);
+    assert_eq!(failed.key.as_deref(), Some("sample:session-c:1:2"));
+
+    std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap()
+        .write_all(&compaction[10..])
+        .unwrap();
+    assert!(parse::parse_appended(&path, &mut session, &mut cursor).unwrap());
+    assert_eq!(session.events.len(), 3);
+    let summary = &session.events[2];
+    assert_eq!(session.models[summary.model as usize], "deepseek-v4-flash");
+    assert_eq!(summary.tokens.total(), 540);
+    assert_eq!(summary.duration_ms, 4000);
+    assert_eq!(summary.key.as_deref(), Some("compaction:c1"));
+    assert_eq!(session.title.as_deref(), Some("Diff review"));
+}

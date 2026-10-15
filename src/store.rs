@@ -73,6 +73,7 @@ pub fn classify(path: &Path) -> Option<Tool> {
             Tool::Antigravity => name.ends_with(".db"),
             Tool::Pi => name.ends_with(".jsonl"),
             Tool::Kimi => name == "wire.jsonl",
+            Tool::Dsh => name == "session.jsonl.zstd" || name == "session.jsonl",
         };
         return matches.then_some(tool);
     }

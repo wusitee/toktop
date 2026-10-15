@@ -2,14 +2,14 @@
 
 A native Linux desktop widget for AI coding tool token usage, written in Rust with GTK 4 and libadwaita. It is a lightweight reimplementation of [Token Monitor](https://github.com/Javis603/token-monitor) for Linux, running as a single process that updates within about a second of each turn.
 
-Supported tools: Claude Code, Codex, Antigravity, [Pi](https://github.com/earendil-works/pi) and Kimi Code.
+Supported tools: Claude Code, Codex, Antigravity, [Pi](https://github.com/earendil-works/pi), Kimi Code and dsh (DeepSeek Harness).
 
 ## Install
 
 Each [release](https://github.com/wusitee/toktop/releases) has a prebuilt x86_64 binary built on Arch Linux. It runs on Arch and its derivatives with the runtime libraries installed; on other distributions, [build from source](#build).
 
 ```sh
-sudo pacman -S --needed gtk4 libadwaita gtk4-layer-shell sqlite openssl
+sudo pacman -S --needed gtk4 libadwaita gtk4-layer-shell sqlite openssl zstd
 tar -xzf toktop-*-x86_64-linux.tar.gz
 cd toktop-*-x86_64-linux
 install -Dm755 toktop ~/.local/bin/toktop
@@ -20,13 +20,13 @@ touch ~/.local/share/icons/hicolor  # invalidate a stale icon cache
 
 ## Build
 
-Requires Rust 1.92+, a C toolchain, `pkg-config`, and GTK 4.12+, libadwaita 1.6+, gtk4-layer-shell, SQLite and OpenSSL development files. Build with `--no-default-features` to drop the gtk4-layer-shell dependency; the widget is then always a window.
+Requires Rust 1.92+, a C toolchain, `pkg-config`, and GTK 4.12+, libadwaita 1.6+, gtk4-layer-shell, SQLite, OpenSSL and zstd development files. Build with `--no-default-features` to drop the gtk4-layer-shell dependency; the widget is then always a window.
 
 ```sh
 # Arch Linux
-sudo pacman -S --needed rust base-devel pkgconf gtk4 libadwaita gtk4-layer-shell sqlite openssl
+sudo pacman -S --needed rust base-devel pkgconf gtk4 libadwaita gtk4-layer-shell sqlite openssl zstd
 # Debian / Ubuntu
-sudo apt install cargo build-essential pkg-config libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev libsqlite3-dev libssl-dev
+sudo apt install cargo build-essential pkg-config libgtk-4-dev libadwaita-1-dev libgtk4-layer-shell-dev libsqlite3-dev libssl-dev libzstd-dev
 
 cargo build --release
 ```

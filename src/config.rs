@@ -257,7 +257,7 @@ mod tool_keys {
         for key in Vec::<String>::deserialize(deserializer)? {
             let tool = Tool::from_key(&key).ok_or_else(|| {
                 D::Error::custom(format!(
-                    "unknown tool `{key}`, expected claude-code, codex, antigravity, pi or kimi-code"
+                    "unknown tool `{key}`, expected claude-code, codex, antigravity, pi, kimi-code or dsh"
                 ))
             })?;
             if !tools.contains(&tool) {
