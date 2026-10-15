@@ -46,6 +46,11 @@ pub fn source_roots(tool: Tool) -> Vec<PathBuf> {
                 .join("sessions")
         })],
         Tool::Kimi => vec![kimi_sessions()],
+        Tool::Dsh => vec![
+            env_dir("DSH_HOME")
+                .unwrap_or_else(|| home.join(".dsh"))
+                .join("sessions"),
+        ],
     }
 }
 

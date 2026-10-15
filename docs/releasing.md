@@ -15,4 +15,4 @@ Releases are built by `.github/workflows/release.yml` when a `v*` tag is pushed.
    - `toktop-<version>-x86_64-linux.tar.gz.sha256`: its SHA-256 checksum
 4. Edit the draft's notes and publish it.
 
-The binary links against the system GTK 4, libadwaita, gtk4-layer-shell, SQLite and OpenSSL, so it runs only where those libraries are at least as new as on Arch Linux at build time.
+The binary links against the system GTK 4, libadwaita, gtk4-layer-shell, SQLite, OpenSSL and zstd, so it runs only where those libraries are at least as new as on Arch Linux at build time.

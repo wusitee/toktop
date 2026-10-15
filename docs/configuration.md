@@ -7,7 +7,7 @@ Most settings can also be changed in the settings window: right-click the widget
 ```toml
 period = "today"                               # today, week, 7d, month, 30d or all
 tray = true                                    # show a tray icon when a panel supports it
-tools = ["claude-code", "codex", "antigravity", "pi", "kimi-code"]
+tools = ["claude-code", "codex", "antigravity", "pi", "kimi-code", "dsh"]
 
 [widget]
 layer = "bottom"      # background, bottom, top, overlay or window
@@ -109,5 +109,5 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 
 | Variable | Effect |
 |---|---|
-| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `KIMI_CODE_HOME` | Tool data locations; see [sources.md](sources.md). |
+| `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `KIMI_CODE_HOME`, `DSH_HOME` | Tool data locations; see [sources.md](sources.md). |
 | `TOKTOP_DEBUG` | Log window and application lifecycle events to stderr; see [architecture.md](architecture.md#debugging). |

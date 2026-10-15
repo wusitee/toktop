@@ -34,7 +34,7 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 
 | Module | Role |
 |---|---|
-| `src/parse/` | One parser per tool, plus a minimal protobuf reader for Antigravity. |
+| `src/parse/` | One parser per tool, plus a minimal protobuf reader for Antigravity and libzstd bindings for dsh. |
 | `src/store.rs` | Index of every source file and its parsed session. Discovers files, re-reads changed ones and loads tool-side title indexes. |
 | `src/aggregate.rs` | Builds a `Summary` for a period: totals, breakdowns by tool, model, project and session (with subagents grouped), daily history, streak, live token rate and average speed. Each breakdown row and day carries a `Split`: its tokens by model, tool and project, and its session count. Model rows also carry their average speed per day over the last 30 days. |
 | `src/pricing.rs`, `src/pricing/aliases.rs` | LiteLLM price table, reduced and cached; tool model aliases; cost per request. |
@@ -47,7 +47,7 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 
 ## Incremental reads
 
-JSONL files are append-only. Each keeps a `Cursor` (byte offset, inode and parser state), so a change parses only the new bytes. A trailing line without a newline is left for the next read. A file that shrinks or changes inode is re-parsed from the start.
+JSONL files are append-only. Each keeps a `Cursor` (byte offset, inode and parser state), so a change parses only the new bytes. A trailing line without a newline is left for the next read. dsh logs are concatenations of Zstandard frames, one per appended batch; their cursor advances by whole frames, decompressed through the system libzstd, and a frame still being written is left for the next read. A file that shrinks or changes inode is re-parsed from the start.
 
 Antigravity databases are re-read whole on change; they are small. A file counts as changed when its inode, size or mtime differs, or those of its SQLite `-wal` sidecar, since commits land there first. A locked or unreadable database keeps its previous snapshot.
 

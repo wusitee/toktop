@@ -1,19 +1,22 @@
 //! Per-tool source parsers.
 //!
-//! Claude Code, Codex, Pi and Kimi Code write append-only JSONL, so their parsers keep a
-//! [`Cursor`] and consume only bytes appended since the previous read.
+//! Claude Code, Codex, Pi, Kimi Code and dsh write append-only JSONL, so their parsers keep a
+//! [`Cursor`] and consume only bytes appended since the previous read. dsh
+//! compresses each appended batch into its own Zstandard frame, read whole.
 //! Antigravity writes SQLite databases, which are re-read whole on change.
 
 pub mod antigravity;
 pub mod claude;
 pub mod codex;
+pub mod dsh;
 pub mod kimi;
 pub mod pi;
 pub mod proto;
+mod zstd;
 
 use crate::model::{Session, Tool};
 use std::fs::File;
-use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::io::{self, BufRead, BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
 /// Longest plausible response time. Longer gaps mean the log missed the
@@ -24,7 +27,7 @@ pub const MAX_RESPONSE_MS: i64 = 15 * 60 * 1000;
 /// needed to continue from it.
 #[derive(Debug)]
 pub struct Cursor {
-    /// Byte offset just past the last complete line consumed.
+    /// Byte offset just past the last complete line (or Zstandard frame) consumed.
     pub offset: u64,
     /// Inode the offset refers to; a replaced file is re-read from the start.
     pub inode: u64,
@@ -37,6 +40,7 @@ pub enum LineState {
     Codex(Box<codex::State>),
     Pi(pi::State),
     Kimi(kimi::State),
+    Dsh(dsh::State),
 }
 
 impl LineState {
@@ -47,6 +51,7 @@ impl LineState {
             Tool::Antigravity => None,
             Tool::Pi => Some(LineState::Pi(pi::State::default())),
             Tool::Kimi => Some(LineState::Kimi(kimi::State::default())),
+            Tool::Dsh => Some(LineState::Dsh(dsh::State::default())),
         }
     }
 
@@ -56,6 +61,7 @@ impl LineState {
             LineState::Codex(state) => state.line(session, line),
             LineState::Pi(state) => state.line(session, line),
             LineState::Kimi(state) => state.line(session, line),
+            LineState::Dsh(state) => state.line(session, line),
         }
     }
 }
@@ -73,7 +79,7 @@ pub fn parse_full(tool: Tool, path: &Path) -> io::Result<(Session, Option<Cursor
                 inode: 0,
                 state,
             };
-            read_lines(path, &mut session, &mut cursor)?;
+            read(path, &mut session, &mut cursor)?;
             if session.id.is_empty() {
                 session.id = file_stem(path);
             }
@@ -90,8 +96,16 @@ pub fn parse_appended(path: &Path, session: &mut Session, cursor: &mut Cursor) -
     if inode(&meta) != cursor.inode || meta.len() < cursor.offset {
         return Ok(false);
     }
-    read_lines(path, session, cursor)?;
+    read(path, session, cursor)?;
     Ok(true)
+}
+
+fn read(path: &Path, session: &mut Session, cursor: &mut Cursor) -> io::Result<()> {
+    if path.extension().is_some_and(|ext| ext == "zstd") {
+        read_frames(path, session, cursor)
+    } else {
+        read_lines(path, session, cursor)
+    }
 }
 
 fn read_lines(path: &Path, session: &mut Session, cursor: &mut Cursor) -> io::Result<()> {
@@ -111,6 +125,33 @@ fn read_lines(path: &Path, session: &mut Session, cursor: &mut Cursor) -> io::Re
         cursor.offset += read as u64;
         cursor.state.line(session, &line);
     }
+}
+
+/// Consumes the complete Zstandard frames after `cursor.offset`. Each frame
+/// holds whole lines; a frame still being written is left for the next read,
+/// and a corrupt one is skipped.
+fn read_frames(path: &Path, session: &mut Session, cursor: &mut Cursor) -> io::Result<()> {
+    let mut file = File::open(path)?;
+    cursor.inode = inode(&file.metadata()?);
+    file.seek(SeekFrom::Start(cursor.offset))?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)?;
+    let mut decoder = zstd::Decoder::new().ok_or_else(|| io::Error::other("zstd context"))?;
+    let mut plain = Vec::new();
+    let mut rest = &data[..];
+    while let Some(size) = zstd::frame_size(rest) {
+        let (frame, next) = rest.split_at(size);
+        rest = next;
+        cursor.offset += size as u64;
+        if decoder.frame(frame, &mut plain) {
+            for line in plain.split(|byte| *byte == b'\n') {
+                if !line.is_empty() {
+                    cursor.state.line(session, line);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(unix)]

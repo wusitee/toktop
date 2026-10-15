@@ -106,6 +106,7 @@ pub(super) fn tool_family(tool: Tool) -> &'static str {
         Tool::Antigravity => "gemini",
         Tool::Pi => "pi",
         Tool::Kimi => "kimi",
+        Tool::Dsh => "deepseek",
     }
 }
 

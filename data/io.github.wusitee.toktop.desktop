@@ -6,5 +6,5 @@ Exec=toktop
 Icon=io.github.wusitee.toktop
 Terminal=false
 Categories=Development;Monitor;
-Keywords=tokens;claude;codex;antigravity;pi;kimi;usage;
+Keywords=tokens;claude;codex;antigravity;pi;kimi;dsh;deepseek;usage;
 StartupNotify=true
