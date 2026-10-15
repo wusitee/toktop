@@ -81,7 +81,7 @@ Source: `usage.record` lines in each agent's `wire.jsonl`, both `turn` scope (mo
 
 Source: `usage` on `assistant/message` lines (one per model step) and `compaction/summary` lines (the summarization call, under its own `model`). `inputTokens` (uncached), `cacheReadTokens` and `cacheWriteTokens` are disjoint; `outputTokens` includes `reasoningTokens`, which is split out. The model is the message's `source.model`.
 
-- As in dsh's own totals, a step's `usage` chunk counts even when the request fails before its message, under the model of the latest `request/context`. The step's message replaces that sample.
+- As in dsh's own totals, a step's `usage` chunk counts as soon as it is written, even when the request then fails, under the model of the latest `request/context` (a fork's inherited one included). A later sample of the same step, or the usage on its message, replaces it; a message without usage leaves it counted.
 
 - A fork child begins with `seedLength` events copied from its parent; lines with a smaller `seq` are skipped.
 - Events are keyed by message id or compaction id, and counted once across files.
