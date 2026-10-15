@@ -1312,3 +1312,53 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
     assert_eq!(summary.key.as_deref(), Some("compaction:c1"));
     assert_eq!(session.title.as_deref(), Some("Diff review"));
 }
+
+#[test]
+fn dsh_v4_reads_attempts_and_skips_tagged_fork_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.v4.jsonl");
+    write(
+        &path,
+        concat!(
+            r#"{"type":"session","version":4,"id":"c4","createdAt":1790848800000,"cwd":"/work/app","parentSession":"p4","isSeeded":true,"delegationDepth":1}"#,
+            "\n",
+            // Inherited: the grandparent's own cut, then parent work.
+            r#"{"type":"request/context","seq":0,"time":1790848700000,"data":{"provider":"deepseek-official","model":"deepseek-flash","contextWindow":1000000}}"#,
+            "\n",
+            r#"{"type":"session/end-seed","seq":1,"time":1790848700001,"data":{"inherited":true}}"#,
+            "\n",
+            r#"{"type":"session/title","seq":2,"time":1790848700002,"data":{"title":"Parent work","source":{"kind":"llm"}}}"#,
+            "\n",
+            r#"{"type":"assistant/message","seq":3,"time":1790848701000,"data":{"turn":1,"step":1,"message":{"id":"m0"},"stream":[],"usage":{"inputTokens":9,"outputTokens":9}}}"#,
+            "\n",
+            r#"{"type":"session/end-seed","seq":4,"time":1790848800000,"data":{"inherited":true}}"#,
+            "\n",
+            // A dsh fallback title cut from injected context is not shown.
+            r#"{"type":"session/title","seq":5,"time":1790848800001,"data":{"title":"<instructions> Use","source":{"kind":"fallback"}}}"#,
+            "\n",
+            r#"{"type":"step/start","seq":6,"time":1790848801000,"data":{"turn":1,"step":1}}"#,
+            "\n",
+            // A failed attempt carries usage only in its stream.
+            r#"{"type":"assistant/attempt","seq":7,"time":1790848803000,"data":{"turn":1,"step":1,"stream":[{"type":"reasoning-chunks","time0":1790848802000},{"type":"chunk","time":1790848802990,"chunk":{"type":"usage","usage":{"inputTokens":40,"outputTokens":4,"cacheReadTokens":0,"cacheWriteTokens":0}}}]}}"#,
+            "\n",
+            r#"{"type":"llm/retry-started","seq":8,"time":1790848804000,"data":{"turn":1,"step":1}}"#,
+            "\n",
+            // The retry's message reports usage only in its stream too.
+            r#"{"type":"assistant/message","seq":9,"time":1790848806000,"data":{"turn":1,"step":1,"message":{"id":"m1","source":{"kind":"model","model":"deepseek-flash"}},"stream":[{"type":"chunk","time":1790848805990,"chunk":{"type":"usage","usage":{"inputTokens":40,"outputTokens":8,"cacheReadTokens":0,"cacheWriteTokens":0}}}]}}"#,
+            "\n",
+        ),
+    );
+    let (session, _) = parse::parse_full(Tool::Dsh, &path).unwrap();
+    assert_eq!(session.id, "c4");
+    assert_eq!(session.title, None);
+    assert_eq!(session.events.len(), 2);
+    let attempt = &session.events[0];
+    assert_eq!(session.models[attempt.model as usize], "deepseek-flash");
+    assert_eq!(attempt.tokens.total(), 44);
+    assert_eq!(attempt.duration_ms, 2000);
+    assert_eq!(attempt.key.as_deref(), Some("attempt:c4:7"));
+    let message = &session.events[1];
+    assert_eq!(message.tokens.total(), 48);
+    assert_eq!(message.duration_ms, 2000);
+    assert_eq!(message.key.as_deref(), Some("message:m1"));
+}

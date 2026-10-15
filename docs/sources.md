@@ -9,8 +9,8 @@ Where toktop finds each tool's usage and how titles are resolved.
 | Antigravity | `~/.gemini/antigravity{,-cli}/conversations/*.db` | SQLite with protobuf blobs |
 | Pi | `$PI_CODING_AGENT_SESSION_DIR/**/*.jsonl`, else `$PI_CODING_AGENT_DIR/sessions` (default `~/.pi/agent/sessions`) | Append-only JSONL |
 | Kimi Code | `$KIMI_CODE_HOME/sessions/<workspace>/session_<id>/agents/<agent>/wire.jsonl` (default `~/.kimi-code`) | Append-only JSONL |
-| dsh | `$DSH_HOME/sessions/<project>/<session>/session.jsonl.zstd` (default `~/.dsh`), or `session.jsonl` with compression off | Append-only JSONL in concatenated Zstandard frames |
+| dsh | `$DSH_HOME/sessions/<project>/<session>/session[.vN].jsonl.zstd` (default `~/.dsh`), or `session[.vN].jsonl` with compression off | Append-only JSONL in concatenated Zstandard frames |
 
 Titles come from Claude `ai-title` / `custom-title` lines, Codex `session_index.jsonl`, Antigravity `conversation_summaries.db`, Pi `session_info` names, Kimi Code `state.json` and dsh `session/title` lines, falling back to the first prompt; see [accounting.md](accounting.md#sessions).
 
-A `sessionDir` set in Pi's `settings.json` is not read; set `PI_CODING_AGENT_SESSION_DIR` instead. Sessions of the earlier Python `kimi-cli` (`~/.kimi`) are not read. A missing root is skipped. Roots created later are picked up by the next scan.
+A `sessionDir` set in Pi's `settings.json` is not read; set `PI_CODING_AGENT_SESSION_DIR` instead. Sessions of the earlier Python `kimi-cli` (`~/.kimi`) are not read. dsh keeps one file per format generation (`session.jsonl.zstd` is v0, `session.v4.jsonl.zstd` v4) and leaves older generations in place when it migrates a session; only the highest generation in a session directory is read. A missing root is skipped. Roots created later are picked up by the next scan.

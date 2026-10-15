@@ -81,3 +81,49 @@ fn sync_all_reloads_titles_without_transcript_changes() {
     assert!(store.titles.is_empty());
     assert!(store.files.is_empty());
 }
+
+#[test]
+fn dsh_reads_only_the_latest_generation() {
+    const CHILD: &str = "TOKTOP_DSH_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "dsh_reads_only_the_latest_generation"])
+            .env(CHILD, "1")
+            .env("HOME", dir.path())
+            .env("DSH_HOME", dir.path().join("dsh"))
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let dir = toktop::paths::source_roots(Tool::Dsh)[0].join("--work--/s1");
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = |id: &str| {
+        format!(
+            "{}\n{}\n",
+            r#"{"type":"session","version":0,"id":"s1","createdAt":1790848800000,"delegationDepth":0}"#,
+            format_args!(
+                r#"{{"type":"assistant/message","seq":0,"time":1790848801000,"data":{{"turn":1,"step":1,"message":{{"id":"{id}"}},"usage":{{"inputTokens":5,"outputTokens":1}}}}}}"#
+            ),
+        )
+    };
+    let old = dir.join("session.jsonl");
+    std::fs::write(&old, log("m1")).unwrap();
+    let mut store = Store::with_tools(vec![Tool::Dsh]);
+    assert!(store.sync_all());
+    assert_eq!(store.files.keys().collect::<Vec<_>>(), [&old]);
+
+    // Opening the session migrates it into a new generation beside the old.
+    let new = dir.join("session.v4.jsonl");
+    std::fs::write(&new, log("m2")).unwrap();
+    assert!(store.update([new.clone()]));
+    assert_eq!(store.files.keys().collect::<Vec<_>>(), [&new]);
+    std::fs::write(&old, log("m3")).unwrap();
+    store.update([old.clone()]);
+    assert_eq!(store.files.keys().collect::<Vec<_>>(), [&new]);
+
+    let mut fresh = Store::with_tools(vec![Tool::Dsh]);
+    fresh.sync_all();
+    assert_eq!(fresh.files.keys().collect::<Vec<_>>(), [&new]);
+}

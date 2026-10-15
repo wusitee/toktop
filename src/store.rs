@@ -73,7 +73,7 @@ pub fn classify(path: &Path) -> Option<Tool> {
             Tool::Antigravity => name.ends_with(".db"),
             Tool::Pi => name.ends_with(".jsonl"),
             Tool::Kimi => name == "wire.jsonl",
-            Tool::Dsh => name == "session.jsonl.zstd" || name == "session.jsonl",
+            Tool::Dsh => parse::dsh::generation(name).is_some() && !parse::dsh::superseded(path),
         };
         return matches.then_some(tool);
     }
@@ -218,7 +218,13 @@ impl Store {
         for path in paths {
             let path = source_path(&path);
             let known = self.files.get(&path).map(|entry| entry.tool);
-            let Some(tool) = classify(&path).or(known) else {
+            let classified = classify(&path);
+            if known == Some(Tool::Dsh) && classified.is_none() && path.exists() {
+                // A later dsh generation replaced this log.
+                changed |= self.files.remove(&path).is_some();
+                continue;
+            }
+            let Some(tool) = classified.or(known) else {
                 titles_dirty |= paths::is_title_source(&self.tools, &path);
                 continue;
             };
@@ -249,6 +255,15 @@ impl Store {
             }
             match read_file(tool, &path) {
                 Ok(entry) => {
+                    if tool == Tool::Dsh {
+                        // Earlier generations of the same session.
+                        let dir = path.parent().map(Path::to_path_buf);
+                        self.files.retain(|other, entry| {
+                            entry.tool != Tool::Dsh
+                                || other == &path
+                                || other.parent() != dir.as_deref()
+                        });
+                    }
                     self.files.insert(path, entry);
                 }
                 Err(_) => {
