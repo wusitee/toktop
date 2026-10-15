@@ -265,7 +265,16 @@ impl Shell {
             description: String::new(),
             period,
         };
-        match tray::Tray::spawn(tx, state) {
+        // Panels look the icon up by name, so fall back to a stock icon when
+        // toktop's own is not installed into an icon theme.
+        let installed = gdk::Display::default()
+            .is_some_and(|display| gtk::IconTheme::for_display(&display).has_icon(APP_ID));
+        let icon = if installed {
+            APP_ID
+        } else {
+            "utilities-system-monitor"
+        };
+        match tray::Tray::spawn(tx, icon, state) {
             Ok(tray) => {
                 self.tray.replace(Some(tray));
             }

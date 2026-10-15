@@ -30,6 +30,7 @@ pub struct State {
 }
 
 struct Item {
+    icon: &'static str,
     commands: async_channel::Sender<Command>,
     state: State,
 }
@@ -54,7 +55,7 @@ impl ksni::Tray for Item {
     }
 
     fn icon_name(&self) -> String {
-        "utilities-system-monitor".into()
+        self.icon.into()
     }
 
     fn tool_tip(&self) -> ToolTip {
@@ -144,9 +145,11 @@ impl Tray {
     /// Registers the icon. Fails when no StatusNotifierItem host is running.
     pub fn spawn(
         commands: async_channel::Sender<Command>,
+        icon: &'static str,
         state: State,
     ) -> Result<Tray, ksni::Error> {
         let handle = Item {
+            icon,
             commands,
             state: state.clone(),
         }

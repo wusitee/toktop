@@ -17,11 +17,12 @@ sudo apt install cargo build-essential pkg-config libgtk-4-dev libadwaita-1-dev 
 cargo build --release
 ```
 
-Install the binary and desktop entry for your user:
+Install the binary, desktop entry and icons for your user:
 
 ```sh
 install -Dm755 target/release/toktop ~/.local/bin/toktop
 install -Dm644 data/io.github.wusitee.toktop.desktop ~/.local/share/applications/io.github.wusitee.toktop.desktop
+cp -r data/icons ~/.local/share/
 ```
 
 ## Usage
