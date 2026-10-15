@@ -27,7 +27,8 @@
 //! attempt, or a message without it, uses the last `usage` chunk of its
 //! embedded `stream`. In v0 logs, a step's `usage` chunk is a line of its own
 //! and counts as soon as it is written, even when the request then fails; a
-//! later sample of the step, or its message's usage, replaces it. Usage
+//! later sample of the same attempt, or its message's usage, replaces it.
+//! An `llm/retry-started` line begins a new attempt, billed on its own. Usage
 //! without a model of its own takes that of the latest `request/context`
 //! (inherited ones included). Events are keyed by message or compaction id,
 //! so a copy in another file counts once.
@@ -76,8 +77,10 @@ pub struct State {
     seed_length: u64,
     /// Time of the latest `step/start`.
     step_start: Option<i64>,
-    /// Turn, step and event index of the current step's usage sample.
+    /// Turn, step and event index of the current attempt's usage sample.
     sample: Option<(u64, u64, usize)>,
+    /// Retries so far in the current step.
+    attempt: u32,
     /// Model of the latest `request/context`.
     model: Option<String>,
     /// Id and time of the latest `compaction/start`, until its summary.
@@ -257,6 +260,7 @@ impl State {
                 session.title = None;
                 session.prompt = None;
                 self.sample = None;
+                self.attempt = 0;
                 self.step_start = None;
                 self.compaction_start = None;
             }
@@ -266,8 +270,13 @@ impl State {
             "step/start" => {
                 self.step_start = Some(time);
                 self.sample = None;
+                self.attempt = 0;
             }
-            "llm/retry-started" => self.step_start = Some(time),
+            "llm/retry-started" => {
+                self.step_start = Some(time);
+                self.sample = None;
+                self.attempt += 1;
+            }
             "assistant/attempt" => {
                 let Some(usage) = data.stream_usage() else {
                     return;
@@ -293,7 +302,7 @@ impl State {
                     return;
                 };
                 let slot = self.slot(turn, step);
-                let key = format!("sample:{}:{turn}:{step}", session.id);
+                let key = format!("sample:{}:{turn}:{step}:{}", session.id, self.attempt);
                 let model = self.model.clone();
                 if let Some(index) = record(
                     session,
@@ -378,7 +387,8 @@ impl State {
         }
     }
 
-    /// Event index of the sample of `turn`/`step`, if one was counted.
+    /// Event index of the current attempt's sample of `turn`/`step`, if one
+    /// was counted.
     fn slot(&self, turn: u64, step: u64) -> Option<usize> {
         self.sample
             .filter(|sample| (sample.0, sample.1) == (turn, step))
