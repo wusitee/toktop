@@ -6,15 +6,16 @@
 //! its button or by clicking the same item again, so clicking another item
 //! switches it directly.
 
+use super::chart;
 use super::widget::{
-    dot, ellipsized, hbox, label, model_family, section, section_header, set_family, tool_family,
-    vbox,
+    Count, dot, ellipsized, hbox, label, model_family, section, section_header, set_family,
+    tool_family, vbox,
 };
 use chrono::{DateTime, Local, NaiveDate};
 use gtk::prelude::*;
 use std::cell::RefCell;
 use std::rc::Rc;
-use toktop::aggregate::{DayRow, Split, Summary, Usage, project_labels};
+use toktop::aggregate::{DayRow, SPEED_DAYS, Split, Summary, Usage, project_labels};
 use toktop::config::Anchor;
 use toktop::format;
 use toktop::model::Tool;
@@ -35,6 +36,12 @@ pub enum Selection {
 pub struct Detail {
     popover: gtk::Popover,
     kind: gtk::Label,
+    /// Title, rebuilt with each render.
+    top: gtk::Box,
+    /// Token count, kept across renders so a refresh cannot drop a click on
+    /// it.
+    hero: Count,
+    /// Everything below the count, rebuilt with each render.
     content: gtk::Box,
     scroll: gtk::ScrolledWindow,
     selected: Rc<RefCell<Option<Selection>>>,
@@ -53,11 +60,17 @@ impl Detail {
             .css_classes(["icon"])
             .valign(gtk::Align::Center)
             .build();
+        let top = vbox(0);
+        let hero = Count::new("detail-hero");
         let content = vbox(0);
+        let column = vbox(0);
+        column.append(&top);
+        column.append(&hero.label);
+        column.append(&content);
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
-            .child(&content)
+            .child(&column)
             .build();
         let frame = vbox(0);
         frame.set_size_request(width, -1);
@@ -84,14 +97,17 @@ impl Detail {
         popover.set_parent(card);
         let selected: Rc<RefCell<Option<Selection>>> = Default::default();
         let state = selected.clone();
-        let body = content.clone();
+        let (title, body) = (top.clone(), content.clone());
         popover.connect_closed(move |_| {
             state.replace(None);
+            clear(&title);
             clear(&body);
         });
         Detail {
             popover,
             kind,
+            top,
+            hero,
             content,
             scroll,
             selected,
@@ -148,8 +164,10 @@ impl Detail {
             return false;
         };
         self.kind.set_label(&info.kind);
+        clear(&self.top);
         clear(&self.content);
-        info.build(&self.content, summary.prices_available);
+        self.hero.set(info.usage.tokens.total());
+        info.build(&self.top, &self.content, summary.prices_available);
         true
     }
 }
@@ -182,6 +200,8 @@ struct Info {
     usage: Usage,
     tiles: Vec<(&'static str, String)>,
     lists: Vec<(&'static str, Vec<Item>)>,
+    /// Daily output speeds over the last [`SPEED_DAYS`] days.
+    daily_speed: Vec<(NaiveDate, f64)>,
     notes: Vec<String>,
 }
 
@@ -277,6 +297,7 @@ impl Info {
                         ("TOOLS", tools(&row.split)),
                         ("PROJECTS", projects(&row.split)),
                     ],
+                    daily_speed: row.daily_speed.clone(),
                     notes: Vec::new(),
                 }
             }
@@ -289,6 +310,7 @@ impl Info {
                     usage: row.usage.clone(),
                     tiles: row_tiles(&row.usage, &row.split),
                     lists: vec![("MODELS", models(&row.split)), ("TOOLS", tools(&row.split))],
+                    daily_speed: Vec::new(),
                     notes: vec![row.key.clone()],
                 }
             }
@@ -304,6 +326,7 @@ impl Info {
                         ("MODELS", models(&row.split)),
                         ("PROJECTS", projects(&row.split)),
                     ],
+                    daily_speed: Vec::new(),
                     notes: Vec::new(),
                 }
             }
@@ -349,6 +372,7 @@ impl Info {
                     usage: session.usage.clone(),
                     tiles,
                     lists: vec![("MODELS", models)],
+                    daily_speed: Vec::new(),
                     notes,
                 }
             }
@@ -377,6 +401,7 @@ impl Info {
                         ("TOOLS", tools(split)),
                         ("PROJECTS", projects(split)),
                     ],
+                    daily_speed: Vec::new(),
                     notes: Vec::new(),
                 }
             }
@@ -384,7 +409,8 @@ impl Info {
         Some(info)
     }
 
-    fn build(self, card: &gtk::Box, prices_available: bool) {
+    /// Fills `top` with the title and `card` with what follows the count.
+    fn build(self, top: &gtk::Box, card: &gtk::Box, prices_available: bool) {
         let usage = &self.usage;
         let total = usage.tokens.total();
 
@@ -403,11 +429,8 @@ impl Info {
         title.set_hexpand(true);
         header.append(&mark);
         header.append(&title);
-        card.append(&header);
+        top.append(&header);
 
-        let hero = label(&["detail-hero"]);
-        hero.set_label(&format::grouped(total));
-        card.append(&hero);
         let summary = label(&["dim"]);
         summary.set_label(&format!(
             "{} · {} requests",
@@ -479,6 +502,35 @@ impl Info {
             composition.append(&row);
         }
         card.append(&composition);
+
+        if !self.daily_speed.is_empty() {
+            let speed = vbox(6);
+            speed.add_css_class("section");
+            let (low, high) = self
+                .daily_speed
+                .iter()
+                .fold((f64::MAX, 0.0f64), |(low, high), (_, speed)| {
+                    (low.min(*speed), high.max(*speed))
+                });
+            let range = label(&["caption"]);
+            range.set_label(&if self.daily_speed.len() > 1 {
+                // The low end without its unit: `9–92 tok/s`.
+                let low = format::speed(low);
+                format!("{}–{}", low.trim_end_matches(" tok/s"), format::speed(high))
+            } else {
+                format::speed(high)
+            });
+            speed.append(&section_header(
+                &section(&format!("SPEED · {SPEED_DAYS}D")),
+                &range,
+            ));
+            speed.append(&chart::speed_line(
+                Local::now().date_naive(),
+                SPEED_DAYS,
+                self.daily_speed,
+            ));
+            card.append(&speed);
+        }
 
         for (title, items) in &self.lists {
             if items.is_empty() {

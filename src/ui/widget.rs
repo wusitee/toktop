@@ -141,6 +141,61 @@ pub(super) fn display_cost(cost: f64, available: bool) -> String {
     }
 }
 
+/// A large token count, compact like `374M` until clicked, then exact like
+/// `373,720,902`. Clicking again switches back. The label must persist
+/// across updates, so a refresh cannot drop a click in progress.
+pub(super) struct Count {
+    pub label: gtk::Label,
+    tokens: Rc<Cell<u64>>,
+    exact: Rc<Cell<bool>>,
+}
+
+impl Count {
+    pub fn new(class: &str) -> Count {
+        let label = label(&[class]);
+        label.set_halign(gtk::Align::Start);
+        label.set_cursor_from_name(Some("pointer"));
+        label.set_tooltip_text(Some("Click to switch between short and exact counts"));
+        let tokens: Rc<Cell<u64>> = Rc::default();
+        let exact: Rc<Cell<bool>> = Rc::default();
+        let click = gtk::GestureClick::builder()
+            .button(gtk::gdk::BUTTON_PRIMARY)
+            .build();
+        // The handler must not hold the label: it owns the controller.
+        let (value, form) = (tokens.clone(), exact.clone());
+        click.connect_released(move |gesture, _, x, y| {
+            let Some(label) = gesture.widget().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            // Dragging off the count before releasing cancels the click.
+            if !label.contains(x, y) {
+                return;
+            }
+            form.set(!form.get());
+            Count::show(&label, value.get(), form.get());
+        });
+        label.add_controller(click);
+        Count {
+            label,
+            tokens,
+            exact,
+        }
+    }
+
+    pub fn set(&self, tokens: u64) {
+        self.tokens.set(tokens);
+        Count::show(&self.label, tokens, self.exact.get());
+    }
+
+    fn show(label: &gtk::Label, tokens: u64, exact: bool) {
+        label.set_label(&if exact {
+            format::grouped(tokens)
+        } else {
+            format::tokens(tokens)
+        });
+    }
+}
+
 /// A small captioned statistic.
 struct Tile {
     root: gtk::Box,
@@ -331,7 +386,7 @@ pub struct Widget {
     period_buttons: Vec<(Period, gtk::ToggleButton)>,
     live: gtk::Box,
     caption: gtk::Label,
-    total: gtk::Label,
+    total: Count,
     detail: gtk::Label,
     notice: gtk::Label,
     speed: Tile,
@@ -410,13 +465,13 @@ impl Widget {
 
         // Hero: total tokens and cost.
         let caption = label(&["caption", "hero-caption"]);
-        let total = label(&["hero"]);
+        let total = Count::new("hero");
         let detail = label(&["dim"]);
         let notice = label(&["caption", "notice"]);
         notice.set_wrap(true);
         notice.set_max_width_chars(40);
         notice.set_visible(false);
-        for widget in [&caption, &total, &detail, &notice] {
+        for widget in [&caption, &total.label, &detail, &notice] {
             root.append(widget);
         }
 
@@ -519,11 +574,14 @@ impl Widget {
         // Expanded, the list scrolls within one row more than it shows
         // collapsed.
         let sessions_list = vbox(0);
+        // The scrollbar takes its own column instead of covering the counts.
         let sessions_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vscrollbar_policy(gtk::PolicyType::Never)
+            .overlay_scrolling(false)
             .propagate_natural_height(true)
             .child(&sessions_list)
+            .css_classes(["sessions-scroll"])
             .build();
         sessions_box.append(&sessions_scroll);
         let sessions_empty = label(&["dim", "empty"]);
@@ -793,12 +851,7 @@ impl Widget {
             "TOKENS · {}",
             summary.period.label().to_uppercase()
         ));
-        let tokens = total.tokens.total();
-        self.total.set_label(&if tokens >= 1_000_000_000_000 {
-            format::tokens(tokens)
-        } else {
-            format::grouped(tokens)
-        });
+        self.total.set(total.tokens.total());
         self.detail.set_label(&format!(
             "{} · {} requests",
             display_cost(total.cost, available),

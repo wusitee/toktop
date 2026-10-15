@@ -283,6 +283,8 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
     assert_eq!(luna.split.sessions, 1);
     assert_eq!(luna.split.tools, [(Tool::Codex, 5320)]);
     assert_eq!(luna.split.projects, [("/work/app".to_owned(), 5320)]);
+    // Only the timed request counts toward the model's daily speed.
+    assert_eq!(luna.daily_speed, [(today, 150.0)]);
     let day = summary.daily.last().unwrap();
     assert_eq!(day.date, today);
     assert_eq!((day.split.sessions, day.split.models.len()), (1, 2));

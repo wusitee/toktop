@@ -36,7 +36,7 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 |---|---|
 | `src/parse/` | One parser per tool, plus a minimal protobuf reader for Antigravity. |
 | `src/store.rs` | Index of every source file and its parsed session. Discovers files, re-reads changed ones and loads tool-side title indexes. |
-| `src/aggregate.rs` | Builds a `Summary` for a period: totals, breakdowns by tool, model, project and session (with subagents grouped), daily history, streak, live token rate and average speed. Each breakdown row and day carries a `Split`: its tokens by model, tool and project, and its session count. |
+| `src/aggregate.rs` | Builds a `Summary` for a period: totals, breakdowns by tool, model, project and session (with subagents grouped), daily history, streak, live token rate and average speed. Each breakdown row and day carries a `Split`: its tokens by model, tool and project, and its session count. Model rows also carry their average speed per day over the last 30 days. |
 | `src/pricing.rs`, `src/pricing/aliases.rs` | LiteLLM price table, reduced and cached; tool model aliases; cost per request. |
 | `src/model.rs` | Shared types: `Tool`, `Tokens`, `Event`, `Session`, rate limits. |
 | `src/paths.rs` | Source and cache locations, with the tools' environment overrides. |
