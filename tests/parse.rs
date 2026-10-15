@@ -1256,13 +1256,20 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
         "\n",
         r#"{"type":"assistant/message","seq":13,"time":1790848806000,"data":{"turn":1,"step":2,"message":{"id":"m2","source":{"kind":"model","model":"deepseek-v4-flash"}}}}"#,
         "\n",
+        // A retry is billed on its own; its message replaces only its sample.
+        r#"{"type":"llm/retry-started","seq":14,"time":1790848807000,"data":{"turn":1,"step":2}}"#,
+        "\n",
+        r#"{"type":"assistant/chunk","seq":15,"time":1790848807900,"data":{"turn":1,"step":2,"chunk":{"type":"usage","usage":{"inputTokens":1,"outputTokens":1}}}}"#,
+        "\n",
+        r#"{"type":"assistant/message","seq":16,"time":1790848808000,"data":{"turn":1,"step":2,"message":{"id":"m3","source":{"kind":"model","model":"deepseek-v4-flash"}},"usage":{"inputTokens":31,"outputTokens":4}}}"#,
+        "\n",
     ));
     let compaction = zstd_frame(concat!(
-        r#"{"type":"compaction/start","seq":14,"time":1790848810000,"data":{"compactionId":"c1"}}"#,
+        r#"{"type":"compaction/start","seq":17,"time":1790848810000,"data":{"compactionId":"c1"}}"#,
         "\n",
-        r#"{"type":"compaction/summary","seq":15,"time":1790848814000,"data":{"compactionId":"c1","model":"deepseek-v4-flash","usage":{"inputTokens":500,"outputTokens":40,"cacheReadTokens":0,"reasoningTokens":0}}}"#,
+        r#"{"type":"compaction/summary","seq":18,"time":1790848814000,"data":{"compactionId":"c1","model":"deepseek-v4-flash","usage":{"inputTokens":500,"outputTokens":40,"cacheReadTokens":0,"reasoningTokens":0}}}"#,
         "\n",
-        r#"{"type":"session/title","seq":16,"time":1790848815000,"data":{"title":" Diff review ","source":{"kind":"llm","model":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
+        r#"{"type":"session/title","seq":19,"time":1790848815000,"data":{"title":" Diff review ","source":{"kind":"llm","model":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
         "\n",
     ));
     let mut bytes = [header, batch].concat();
@@ -1276,7 +1283,7 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
     assert_eq!(session.parent.as_deref(), Some("session-p"));
     assert_eq!(session.project.as_deref(), Some("/work/app"));
     assert_eq!(session.prompt.as_deref(), Some("Review the diff"));
-    assert_eq!(session.events.len(), 2);
+    assert_eq!(session.events.len(), 3);
     let event = &session.events[0];
     assert_eq!(
         event.tokens,
@@ -1295,7 +1302,11 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
     assert_eq!(failed.tokens.total(), 33);
     assert_eq!(session.models[failed.model as usize], "deepseek-v4-pro");
     assert_eq!(failed.duration_ms, 1000);
-    assert_eq!(failed.key.as_deref(), Some("sample:session-c:1:2"));
+    assert_eq!(failed.key.as_deref(), Some("sample:session-c:1:2:0"));
+    let retry = &session.events[2];
+    assert_eq!(retry.tokens.total(), 35);
+    assert_eq!(retry.duration_ms, 1000);
+    assert_eq!(retry.key.as_deref(), Some("message:m3"));
 
     std::fs::OpenOptions::new()
         .append(true)
@@ -1304,11 +1315,61 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
         .write_all(&compaction[10..])
         .unwrap();
     assert!(parse::parse_appended(&path, &mut session, &mut cursor).unwrap());
-    assert_eq!(session.events.len(), 3);
-    let summary = &session.events[2];
+    assert_eq!(session.events.len(), 4);
+    let summary = &session.events[3];
     assert_eq!(session.models[summary.model as usize], "deepseek-v4-flash");
     assert_eq!(summary.tokens.total(), 540);
     assert_eq!(summary.duration_ms, 4000);
     assert_eq!(summary.key.as_deref(), Some("compaction:c1"));
     assert_eq!(session.title.as_deref(), Some("Diff review"));
+}
+
+#[test]
+fn dsh_v4_reads_attempts_and_skips_tagged_fork_seed() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("session.v4.jsonl");
+    write(
+        &path,
+        concat!(
+            r#"{"type":"session","version":4,"id":"c4","createdAt":1790848800000,"cwd":"/work/app","parentSession":"p4","isSeeded":true,"delegationDepth":1}"#,
+            "\n",
+            // Inherited: the grandparent's own cut, then parent work.
+            r#"{"type":"request/context","seq":0,"time":1790848700000,"data":{"provider":"deepseek-official","model":"deepseek-flash","contextWindow":1000000}}"#,
+            "\n",
+            r#"{"type":"session/end-seed","seq":1,"time":1790848700001,"data":{"inherited":true}}"#,
+            "\n",
+            r#"{"type":"session/title","seq":2,"time":1790848700002,"data":{"title":"Parent work","source":{"kind":"llm"}}}"#,
+            "\n",
+            r#"{"type":"assistant/message","seq":3,"time":1790848701000,"data":{"turn":1,"step":1,"message":{"id":"m0"},"stream":[],"usage":{"inputTokens":9,"outputTokens":9}}}"#,
+            "\n",
+            r#"{"type":"session/end-seed","seq":4,"time":1790848800000,"data":{"inherited":true}}"#,
+            "\n",
+            // A dsh fallback title cut from injected context is not shown.
+            r#"{"type":"session/title","seq":5,"time":1790848800001,"data":{"title":"<instructions> Use","source":{"kind":"fallback"}}}"#,
+            "\n",
+            r#"{"type":"step/start","seq":6,"time":1790848801000,"data":{"turn":1,"step":1}}"#,
+            "\n",
+            // A failed attempt carries usage only in its stream.
+            r#"{"type":"assistant/attempt","seq":7,"time":1790848803000,"data":{"turn":1,"step":1,"stream":[{"type":"reasoning-chunks","time0":1790848802000},{"type":"chunk","time":1790848802990,"chunk":{"type":"usage","usage":{"inputTokens":40,"outputTokens":4,"cacheReadTokens":0,"cacheWriteTokens":0}}}]}}"#,
+            "\n",
+            r#"{"type":"llm/retry-started","seq":8,"time":1790848804000,"data":{"turn":1,"step":1}}"#,
+            "\n",
+            // The retry's message reports usage only in its stream too.
+            r#"{"type":"assistant/message","seq":9,"time":1790848806000,"data":{"turn":1,"step":1,"message":{"id":"m1","source":{"kind":"model","model":"deepseek-flash"}},"stream":[{"type":"chunk","time":1790848805990,"chunk":{"type":"usage","usage":{"inputTokens":40,"outputTokens":8,"cacheReadTokens":0,"cacheWriteTokens":0}}}]}}"#,
+            "\n",
+        ),
+    );
+    let (session, _) = parse::parse_full(Tool::Dsh, &path).unwrap();
+    assert_eq!(session.id, "c4");
+    assert_eq!(session.title, None);
+    assert_eq!(session.events.len(), 2);
+    let attempt = &session.events[0];
+    assert_eq!(session.models[attempt.model as usize], "deepseek-flash");
+    assert_eq!(attempt.tokens.total(), 44);
+    assert_eq!(attempt.duration_ms, 2000);
+    assert_eq!(attempt.key.as_deref(), Some("attempt:c4:7"));
+    let message = &session.events[1];
+    assert_eq!(message.tokens.total(), 48);
+    assert_eq!(message.duration_ms, 2000);
+    assert_eq!(message.key.as_deref(), Some("message:m1"));
 }

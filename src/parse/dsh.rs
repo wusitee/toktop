@@ -1,34 +1,74 @@
 //! DeepSeek Harness (`dsh`) sessions:
-//! `~/.dsh/sessions/--<cwd>--/<session-id>/session.jsonl.zstd`.
+//! `~/.dsh/sessions/--<cwd>--/<session-id>/session[.vN].jsonl.zstd`.
 //!
 //! Each session is one append-only JSONL log, stored by default as
 //! concatenated Zstandard frames: one for the header line, then one per
 //! appended batch of lines. Complete frames are read as they land; a frame
 //! still being written is left for the next read. With compression turned
-//! off, dsh writes plain `session.jsonl` with the same lines.
+//! off, dsh writes plain `session[.vN].jsonl` with the same lines.
+//!
+//! Each format version is a generation of its own: `session.jsonl.zstd` is
+//! v0, `session.v4.jsonl.zstd` v4. Opening an older session migrates it into
+//! a new generation and leaves the old file in place, so only the highest
+//! generation of a session directory is read ([`generation`],
+//! [`superseded`]).
 //!
 //! The first line is the `session` header with the id, working directory and,
 //! for a child session, `parentSession`. A subagent child (`origin`
-//! `subagent`) is grouped under its parent. A fork child starts with
-//! `seedLength` events copied from its parent, which are skipped.
+//! `subagent`) is grouped under its parent. A fork child starts with history
+//! copied from its parent, which is skipped: up to `seedLength` events (v0),
+//! or up to its last `session/end-seed` marker tagged `inherited` (v4).
 //!
-//! Usage comes from `assistant/message` lines (one per model step) and
+//! Usage comes from `assistant/message` lines (one per settled model call),
+//! `assistant/attempt` lines (a failed, retried or cancelled call; v4) and
 //! `compaction/summary` lines (the summarization call). `inputTokens`
 //! (uncached), `cacheReadTokens` and `cacheWriteTokens` are disjoint;
-//! `outputTokens` includes `reasoningTokens`. As in dsh's own totals, a
-//! step's `usage` chunk counts as soon as it is written, even when the
-//! request then fails, under the model of the latest `request/context`
-//! (inherited ones included). A later sample of the step, or its message's
-//! usage, replaces it. Events are keyed by message or compaction id, so a
-//! copy in another file counts once.
+//! `outputTokens` includes `reasoningTokens`. A message carries `usage`; an
+//! attempt, or a message without it, uses the last `usage` chunk of its
+//! embedded `stream`. In v0 logs, a step's `usage` chunk is a line of its own
+//! and counts as soon as it is written, even when the request then fails; a
+//! later sample of the same attempt, or its message's usage, replaces it.
+//! An `llm/retry-started` line begins a new attempt, billed on its own. Usage
+//! without a model of its own takes that of the latest `request/context`
+//! (inherited ones included). Events are keyed by message or compaction id,
+//! so a copy in another file counts once.
 //!
-//! A step's request starts at its `step/start` line and ends when its
-//! `assistant/message` (or usage sample) is written; a compaction runs from
-//! `compaction/start` to its summary.
+//! A request starts at its `step/start` (or `llm/retry-started`) line and
+//! ends when its message, attempt or usage sample is written; a compaction
+//! runs from `compaction/start` to its summary.
 
 use super::{MAX_RESPONSE_MS, clamp, contains, prompt_title};
 use crate::model::{Event, ServiceTier, Session, Tokens};
 use serde::Deserialize;
+use std::path::Path;
+
+/// Format generation of a dsh session log named `name`: 0 for
+/// `session.jsonl[.zstd]`, N for `session.vN.jsonl[.zstd]`.
+pub fn generation(name: &str) -> Option<u32> {
+    let stem = name
+        .strip_suffix(".zstd")
+        .unwrap_or(name)
+        .strip_suffix(".jsonl")?;
+    match stem.strip_prefix("session") {
+        Some("") => Some(0),
+        Some(rest) => rest.strip_prefix(".v")?.parse().ok(),
+        None => None,
+    }
+}
+
+/// Whether a later generation of the same session sits beside `path`.
+pub fn superseded(path: &Path) -> bool {
+    let generation_of = |path: &Path| generation(path.file_name()?.to_str()?);
+    let (Some(own), Some(dir)) = (generation_of(path), path.parent()) else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries
+        .flatten()
+        .any(|entry| generation_of(&entry.path()).is_some_and(|other| other > own))
+}
 
 #[derive(Debug, Default)]
 pub struct State {
@@ -37,8 +77,10 @@ pub struct State {
     seed_length: u64,
     /// Time of the latest `step/start`.
     step_start: Option<i64>,
-    /// Turn, step and event index of the current step's usage sample.
+    /// Turn, step and event index of the current attempt's usage sample.
     sample: Option<(u64, u64, usize)>,
+    /// Retries so far in the current step.
+    attempt: u32,
     /// Model of the latest `request/context`.
     model: Option<String>,
     /// Id and time of the latest `compaction/start`, until its summary.
@@ -83,6 +125,29 @@ struct Data {
     step: Option<u64>,
     /// On `assistant/chunk`.
     chunk: Option<Chunk>,
+    /// Timed model stream embedded in `assistant/message` and
+    /// `assistant/attempt` (v4).
+    stream: Option<Vec<StreamRecord>>,
+    /// On `session/end-seed`: the marker ends the fork-inherited prefix.
+    inherited: Option<bool>,
+}
+
+/// One stream record; packed delta rows have no `chunk`.
+#[derive(Deserialize)]
+struct StreamRecord {
+    chunk: Option<Chunk>,
+}
+
+impl Data {
+    /// The last usage reported in the embedded stream.
+    fn stream_usage(&self) -> Option<&Usage> {
+        self.stream.as_ref()?.iter().rev().find_map(|record| {
+            let chunk = record.chunk.as_ref()?;
+            (chunk.kind.as_deref() == Some("usage"))
+                .then_some(chunk.usage.as_ref())
+                .flatten()
+        })
+    }
 }
 
 #[derive(Deserialize)]
@@ -134,10 +199,13 @@ impl Usage {
 }
 
 /// Line types read; every line starts with its type.
-const WANTED: [&[u8]; 8] = [
+const WANTED: [&[u8]; 11] = [
     b"{\"type\":\"session\"",
     b"{\"type\":\"assistant/message\"",
+    b"{\"type\":\"assistant/attempt\"",
     b"{\"type\":\"step/start\"",
+    b"{\"type\":\"llm/retry-started\"",
+    b"{\"type\":\"session/end-seed\"",
     b"{\"type\":\"request/context\"",
     b"{\"type\":\"compaction/start\"",
     b"{\"type\":\"compaction/summary\"",
@@ -148,7 +216,7 @@ const WANTED: [&[u8]; 8] = [
 impl State {
     pub fn line(&mut self, session: &mut Session, raw: &[u8]) {
         let wanted = WANTED.iter().any(|prefix| raw.starts_with(prefix))
-            && !(session.prompt.is_some() && raw.starts_with(WANTED[7]));
+            && !(session.prompt.is_some() && raw.starts_with(WANTED[10]));
         // Only usage chunks among the many streaming ones.
         let usage_chunk = raw.starts_with(b"{\"type\":\"assistant/chunk\"")
             && contains(raw, b"\"chunk\":{\"type\":\"usage\"");
@@ -184,10 +252,46 @@ impl State {
         if line.seq.unwrap_or(0) < self.seed_length {
             return;
         }
+        if line.kind == "session/end-seed" {
+            if data.inherited == Some(true) {
+                // Everything so far was copied from the parent. A fork of a
+                // fork also holds its ancestor's marker; the last one counts.
+                session.events.clear();
+                session.title = None;
+                session.prompt = None;
+                self.sample = None;
+                self.attempt = 0;
+                self.step_start = None;
+                self.compaction_start = None;
+            }
+            return;
+        }
         match line.kind.as_str() {
             "step/start" => {
                 self.step_start = Some(time);
                 self.sample = None;
+                self.attempt = 0;
+            }
+            "llm/retry-started" => {
+                self.step_start = Some(time);
+                self.sample = None;
+                self.attempt += 1;
+            }
+            "assistant/attempt" => {
+                let Some(usage) = data.stream_usage() else {
+                    return;
+                };
+                let key = format!("attempt:{}:{}", session.id, line.seq.unwrap_or(0));
+                let model = self.model.clone();
+                record(
+                    session,
+                    None,
+                    usage.tokens(),
+                    model,
+                    time,
+                    self.step_start,
+                    Some(key),
+                );
             }
             "assistant/chunk" => {
                 let (Some(turn), Some(step), Some(chunk)) = (data.turn, data.step, data.chunk)
@@ -198,7 +302,7 @@ impl State {
                     return;
                 };
                 let slot = self.slot(turn, step);
-                let key = format!("sample:{}:{turn}:{step}", session.id);
+                let key = format!("sample:{}:{turn}:{step}:{}", session.id, self.attempt);
                 let model = self.model.clone();
                 if let Some(index) = record(
                     session,
@@ -214,7 +318,9 @@ impl State {
             }
             "assistant/message" => {
                 // A message without usage leaves the step's sample counted.
-                let Some(usage) = &data.usage else { return };
+                let Some(usage) = data.usage.as_ref().or_else(|| data.stream_usage()) else {
+                    return;
+                };
                 let slot = match (data.turn, data.step) {
                     (Some(turn), Some(step)) => self.slot(turn, step),
                     _ => None,
@@ -253,10 +359,19 @@ impl State {
                 record(session, None, usage.tokens(), data.model, time, start, key);
             }
             "session/title" => {
-                session.title = data
-                    .title
-                    .map(|title| title.trim().to_owned())
-                    .filter(|title| !title.is_empty());
+                let fallback = data
+                    .source
+                    .as_ref()
+                    .and_then(|source| source.kind.as_deref())
+                    == Some("fallback");
+                session.title = data.title.and_then(|title| {
+                    if fallback {
+                        // Cut from the first message, which may be injected context.
+                        prompt_title(&title)
+                    } else {
+                        Some(title.trim().to_owned()).filter(|title| !title.is_empty())
+                    }
+                });
             }
             // Typed prompts only, not plugin notices.
             "user/message"
@@ -272,7 +387,8 @@ impl State {
         }
     }
 
-    /// Event index of the sample of `turn`/`step`, if one was counted.
+    /// Event index of the current attempt's sample of `turn`/`step`, if one
+    /// was counted.
     fn slot(&self, turn: u64, step: u64) -> Option<usize> {
         self.sample
             .filter(|sample| (sample.0, sample.1) == (turn, step))
