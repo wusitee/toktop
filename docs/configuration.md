@@ -80,7 +80,7 @@ The layer namespace is `toktop` on every compositor.
 
 ## Style
 
-The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if present, is loaded over the [built-in stylesheet](../src/ui/style.css) at user priority and read at startup; parse errors are reported on stderr. Colors are named, so most themes only redefine them:
+The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if present, is loaded over the [built-in stylesheet](https://github.com/wusitee/toktop/blob/main/src/ui/style.css) at user priority and read at startup; parse errors are reported on stderr. Colors are named, so most themes only redefine them:
 
 ```css
 @define-color toktop_bg rgba(20, 20, 28, 0.75);
