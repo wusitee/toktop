@@ -13,7 +13,7 @@ use super::widget::{
 };
 use chrono::{DateTime, Local, NaiveDate};
 use gtk::prelude::*;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::rc::Rc;
 use toktop::aggregate::{DayRow, SPEED_DAYS, Split, Summary, Usage, project_labels};
 use toktop::config::Anchor;
@@ -36,11 +36,15 @@ pub enum Selection {
 pub struct Detail {
     popover: gtk::Popover,
     kind: gtk::Label,
+    /// Title, rebuilt with each render.
+    top: gtk::Box,
+    /// Token count, kept across renders so a refresh cannot drop a click on
+    /// it.
+    hero: Count,
+    /// Everything below the count, rebuilt with each render.
     content: gtk::Box,
     scroll: gtk::ScrolledWindow,
     selected: Rc<RefCell<Option<Selection>>>,
-    /// Whether the hero shows the exact count; kept across renders.
-    exact: Rc<Cell<bool>>,
 }
 
 impl Detail {
@@ -56,11 +60,17 @@ impl Detail {
             .css_classes(["icon"])
             .valign(gtk::Align::Center)
             .build();
+        let top = vbox(0);
+        let hero = Count::new("detail-hero");
         let content = vbox(0);
+        let column = vbox(0);
+        column.append(&top);
+        column.append(&hero.label);
+        column.append(&content);
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
-            .child(&content)
+            .child(&column)
             .build();
         let frame = vbox(0);
         frame.set_size_request(width, -1);
@@ -87,18 +97,20 @@ impl Detail {
         popover.set_parent(card);
         let selected: Rc<RefCell<Option<Selection>>> = Default::default();
         let state = selected.clone();
-        let body = content.clone();
+        let (title, body) = (top.clone(), content.clone());
         popover.connect_closed(move |_| {
             state.replace(None);
+            clear(&title);
             clear(&body);
         });
         Detail {
             popover,
             kind,
+            top,
+            hero,
             content,
             scroll,
             selected,
-            exact: Rc::default(),
         }
     }
 
@@ -152,8 +164,10 @@ impl Detail {
             return false;
         };
         self.kind.set_label(&info.kind);
+        clear(&self.top);
         clear(&self.content);
-        info.build(&self.content, summary.prices_available, &self.exact);
+        self.hero.set(info.usage.tokens.total());
+        info.build(&self.top, &self.content, summary.prices_available);
         true
     }
 }
@@ -395,7 +409,8 @@ impl Info {
         Some(info)
     }
 
-    fn build(self, card: &gtk::Box, prices_available: bool, exact: &Rc<Cell<bool>>) {
+    /// Fills `top` with the title and `card` with what follows the count.
+    fn build(self, top: &gtk::Box, card: &gtk::Box, prices_available: bool) {
         let usage = &self.usage;
         let total = usage.tokens.total();
 
@@ -414,12 +429,8 @@ impl Info {
         title.set_hexpand(true);
         header.append(&mark);
         header.append(&title);
-        card.append(&header);
+        top.append(&header);
 
-        let hero = Count::new("detail-hero", exact.clone());
-        hero.label.set_halign(gtk::Align::Start);
-        hero.set(total);
-        card.append(&hero.label);
         let summary = label(&["dim"]);
         summary.set_label(&format!(
             "{} · {} requests",
@@ -503,7 +514,9 @@ impl Info {
                 });
             let range = label(&["caption"]);
             range.set_label(&if self.daily_speed.len() > 1 {
-                format!("{:.0}–{}", low, format::speed(high))
+                // The low end without its unit: `9–92 tok/s`.
+                let low = format::speed(low);
+                format!("{}–{}", low.trim_end_matches(" tok/s"), format::speed(high))
             } else {
                 format::speed(high)
             });

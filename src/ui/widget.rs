@@ -142,7 +142,8 @@ pub(super) fn display_cost(cost: f64, available: bool) -> String {
 }
 
 /// A large token count, compact like `374M` until clicked, then exact like
-/// `373,720,902`. Clicking again switches back.
+/// `373,720,902`. Clicking again switches back. The label must persist
+/// across updates, so a refresh cannot drop a click in progress.
 pub(super) struct Count {
     pub label: gtk::Label,
     tokens: Rc<Cell<u64>>,
@@ -150,22 +151,28 @@ pub(super) struct Count {
 }
 
 impl Count {
-    /// `exact` holds the chosen form, so it can outlive the label.
-    pub fn new(class: &str, exact: Rc<Cell<bool>>) -> Count {
+    pub fn new(class: &str) -> Count {
         let label = label(&[class]);
+        label.set_halign(gtk::Align::Start);
         label.set_cursor_from_name(Some("pointer"));
         label.set_tooltip_text(Some("Click to switch between short and exact counts"));
         let tokens: Rc<Cell<u64>> = Rc::default();
+        let exact: Rc<Cell<bool>> = Rc::default();
         let click = gtk::GestureClick::builder()
             .button(gtk::gdk::BUTTON_PRIMARY)
             .build();
         // The handler must not hold the label: it owns the controller.
-        let (target, value, form) = (label.downgrade(), tokens.clone(), exact.clone());
-        click.connect_released(move |_, _, _, _| {
-            form.set(!form.get());
-            if let Some(label) = target.upgrade() {
-                Count::show(&label, value.get(), form.get());
+        let (value, form) = (tokens.clone(), exact.clone());
+        click.connect_released(move |gesture, _, x, y| {
+            let Some(label) = gesture.widget().and_downcast::<gtk::Label>() else {
+                return;
+            };
+            // Dragging off the count before releasing cancels the click.
+            if !label.contains(x, y) {
+                return;
             }
+            form.set(!form.get());
+            Count::show(&label, value.get(), form.get());
         });
         label.add_controller(click);
         Count {
@@ -458,8 +465,7 @@ impl Widget {
 
         // Hero: total tokens and cost.
         let caption = label(&["caption", "hero-caption"]);
-        let total = Count::new("hero", Rc::default());
-        total.label.set_halign(gtk::Align::Start);
+        let total = Count::new("hero");
         let detail = label(&["dim"]);
         let notice = label(&["caption", "notice"]);
         notice.set_wrap(true);
