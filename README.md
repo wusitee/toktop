@@ -15,6 +15,7 @@ cd toktop-*-x86_64-linux
 install -Dm755 toktop ~/.local/bin/toktop
 install -Dm644 data/io.github.wusitee.toktop.desktop ~/.local/share/applications/io.github.wusitee.toktop.desktop
 cp -r data/icons ~/.local/share/
+touch ~/.local/share/icons/hicolor  # invalidate a stale icon cache
 ```
 
 ## Build
