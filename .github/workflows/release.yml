@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Build against the same Arch Linux libraries as CI.
+    container: archlinux:latest
+    steps:
+      - name: Install system packages
+        run: pacman -Syu --noconfirm --needed base-devel git rustup github-cli gtk4 libadwaita gtk4-layer-shell sqlite
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        run: rustup default stable
+      - name: Check the tag matches the crate version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          test "$GITHUB_REF_NAME" = "v$version"
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          name="toktop-${GITHUB_REF_NAME#v}-x86_64-linux"
+          mkdir -p "$name/data"
+          cp -r target/release/toktop LICENSE README.md docs "$name/"
+          cp -r data/*.desktop data/icons "$name/data/"
+          tar -czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - name: Create a draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+            --title "toktop $GITHUB_REF_NAME" --generate-notes \
+            toktop-*.tar.gz toktop-*.tar.gz.sha256

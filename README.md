@@ -4,6 +4,20 @@ A native Linux desktop widget for AI coding tool token usage, written in Rust wi
 
 Supported tools: Claude Code, Codex, Antigravity, [Pi](https://github.com/earendil-works/pi) and Kimi Code.
 
+## Install
+
+Each [release](https://github.com/wusitee/toktop/releases) has a prebuilt x86_64 binary built on Arch Linux. It runs on Arch and its derivatives with the runtime libraries installed; on other distributions, [build from source](#build).
+
+```sh
+sudo pacman -S --needed gtk4 libadwaita gtk4-layer-shell sqlite openssl
+tar -xzf toktop-*-x86_64-linux.tar.gz
+cd toktop-*-x86_64-linux
+install -Dm755 toktop ~/.local/bin/toktop
+install -Dm644 data/io.github.wusitee.toktop.desktop ~/.local/share/applications/io.github.wusitee.toktop.desktop
+cp -r data/icons ~/.local/share/
+touch ~/.local/share/icons/hicolor  # invalidate a stale icon cache
+```
+
 ## Build
 
 Requires Rust 1.92+, a C toolchain, `pkg-config`, and GTK 4.12+, libadwaita 1.6+, gtk4-layer-shell, SQLite and OpenSSL development files. Build with `--no-default-features` to drop the gtk4-layer-shell dependency; the widget is then always a window.
@@ -69,3 +83,4 @@ toktop --print [today|week|7d|month|30d|all]
 - [Token accounting](docs/accounting.md): per-tool parsing and deduplication rules, response times, session titles
 - [Pricing](docs/pricing.md): price source, model lookup and cost rules
 - [Configuration](docs/configuration.md): settings file, widget layers, Hyprland setup, style and command line
+- [Releasing](docs/releasing.md): cutting a release
