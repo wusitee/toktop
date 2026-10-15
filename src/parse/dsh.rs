@@ -14,15 +14,18 @@
 //!
 //! Usage comes from `assistant/message` lines (one per model step) and
 //! `compaction/summary` lines (the summarization call). `inputTokens`
-//! (uncached) and `cacheReadTokens` are disjoint; `outputTokens` includes
-//! `reasoningTokens`. Events are keyed by message or compaction id, so a copy
-//! in another file counts once.
+//! (uncached), `cacheReadTokens` and `cacheWriteTokens` are disjoint;
+//! `outputTokens` includes `reasoningTokens`. As in dsh's own totals, a
+//! step's `usage` chunk counts even when the request fails before its
+//! message; the message's usage replaces the step's sample. Such a sample
+//! takes the model of the latest `request/context`. Events are keyed by
+//! message or compaction id, so a copy in another file counts once.
 //!
 //! A step's request starts at its `step/start` line and ends when its
-//! `assistant/message` is written; a compaction runs from `compaction/start`
-//! to its summary.
+//! `assistant/message` (or usage sample) is written; a compaction runs from
+//! `compaction/start` to its summary.
 
-use super::{MAX_RESPONSE_MS, clamp, prompt_title};
+use super::{MAX_RESPONSE_MS, clamp, contains, prompt_title};
 use crate::model::{Event, ServiceTier, Session, Tokens};
 use serde::Deserialize;
 
@@ -31,10 +34,24 @@ pub struct State {
     have_header: bool,
     /// Lines with a smaller `seq` were copied from the parent.
     seed_length: u64,
-    /// Time of the latest `step/start`, until its message.
+    /// Time of the latest `step/start`.
     step_start: Option<i64>,
+    /// Usage reported by the current step, until its message replaces it or
+    /// the step ends without one.
+    sample: Option<Sample>,
+    /// Model of the latest `request/context`.
+    model: Option<String>,
     /// Id and time of the latest `compaction/start`, until its summary.
     compaction_start: Option<(String, i64)>,
+}
+
+#[derive(Debug)]
+struct Sample {
+    turn: u64,
+    step: u64,
+    tokens: Tokens,
+    time: i64,
+    start: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -62,25 +79,42 @@ struct Data {
     message: Option<Message>,
     /// On `compaction/*`.
     compaction_id: Option<String>,
-    /// On `compaction/summary`.
+    /// On `compaction/summary` and `request/context`.
     model: Option<String>,
     /// On `session/title`.
     title: Option<String>,
     /// On `user/message`.
     content: Option<serde_json::Value>,
-    source: Option<Source>,
+    /// Origin of a `user/message`.
+    source: Option<PromptSource>,
+    /// On step lines and `assistant/*`.
+    turn: Option<u64>,
+    step: Option<u64>,
+    /// On `assistant/chunk`.
+    chunk: Option<Chunk>,
 }
 
 #[derive(Deserialize)]
 struct Message {
     id: Option<String>,
-    source: Option<Source>,
+    source: Option<ModelSource>,
 }
 
 #[derive(Deserialize)]
-struct Source {
+struct PromptSource {
     kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ModelSource {
     model: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct Chunk {
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +123,7 @@ struct Usage {
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     cache_read_tokens: Option<i64>,
+    cache_write_tokens: Option<i64>,
     reasoning_tokens: Option<i64>,
 }
 
@@ -100,17 +135,21 @@ impl Usage {
             input: clamp(self.input_tokens),
             output: output - reasoning,
             cache_read: clamp(self.cache_read_tokens),
+            cache_write: clamp(self.cache_write_tokens),
+            cache_write_1h: 0,
             reasoning,
-            ..Tokens::default()
         }
     }
 }
 
 /// Line types read; every line starts with its type.
-const WANTED: [&[u8]; 7] = [
+const WANTED: [&[u8]; 10] = [
     b"{\"type\":\"session\"",
     b"{\"type\":\"assistant/message\"",
     b"{\"type\":\"step/start\"",
+    b"{\"type\":\"step/end\"",
+    b"{\"type\":\"turn/end\"",
+    b"{\"type\":\"request/context\"",
     b"{\"type\":\"compaction/start\"",
     b"{\"type\":\"compaction/summary\"",
     b"{\"type\":\"session/title\"",
@@ -119,9 +158,12 @@ const WANTED: [&[u8]; 7] = [
 
 impl State {
     pub fn line(&mut self, session: &mut Session, raw: &[u8]) {
-        if !WANTED.iter().any(|prefix| raw.starts_with(prefix))
-            || (session.prompt.is_some() && raw.starts_with(WANTED[6]))
-        {
+        let wanted = WANTED.iter().any(|prefix| raw.starts_with(prefix))
+            && !(session.prompt.is_some() && raw.starts_with(WANTED[9]));
+        // Only usage chunks among the many streaming ones.
+        let usage_chunk = raw.starts_with(b"{\"type\":\"assistant/chunk\"")
+            && contains(raw, b"\"chunk\":{\"type\":\"usage\"");
+        if !wanted && !usage_chunk {
             return;
         }
         let Ok(line) = serde_json::from_slice::<Line>(raw) else {
@@ -149,8 +191,42 @@ impl State {
             return;
         };
         match line.kind.as_str() {
-            "step/start" => self.step_start = Some(time),
+            "request/context" => self.model = data.model,
+            "step/start" => {
+                self.flush(session);
+                self.step_start = Some(time);
+            }
+            "step/end" | "turn/end" => self.flush(session),
+            "assistant/chunk" => {
+                let (Some(turn), Some(step), Some(chunk)) = (data.turn, data.step, data.chunk)
+                else {
+                    return;
+                };
+                let (Some("usage"), Some(usage)) = (chunk.kind.as_deref(), chunk.usage) else {
+                    return;
+                };
+                // A later sample of the same step replaces the earlier one.
+                if self
+                    .sample
+                    .as_ref()
+                    .is_some_and(|sample| (sample.turn, sample.step) != (turn, step))
+                {
+                    self.flush(session);
+                }
+                self.sample = Some(Sample {
+                    turn,
+                    step,
+                    tokens: usage.tokens(),
+                    time,
+                    start: self.step_start,
+                });
+            }
             "assistant/message" => {
+                if self.sample.as_ref().is_some_and(|sample| {
+                    (Some(sample.turn), Some(sample.step)) == (data.turn, data.step)
+                }) {
+                    self.sample = None;
+                }
                 let start = self.step_start.take();
                 let Some(usage) = &data.usage else { return };
                 let message = data.message.as_ref();
@@ -160,7 +236,7 @@ impl State {
                 let key = message
                     .and_then(|message| message.id.as_deref())
                     .map(|id| format!("message:{id}"));
-                record(session, usage, model, time, start, key);
+                record(session, usage.tokens(), model, time, start, key);
             }
             "compaction/start" => {
                 if let Some(id) = data.compaction_id {
@@ -175,7 +251,7 @@ impl State {
                 };
                 self.compaction_start = None;
                 let key = data.compaction_id.map(|id| format!("compaction:{id}"));
-                record(session, usage, data.model, time, start, key);
+                record(session, usage.tokens(), data.model, time, start, key);
             }
             "session/title" => {
                 session.title = data
@@ -196,17 +272,32 @@ impl State {
             _ => {}
         }
     }
+
+    /// Counts the usage of a step that ended without a message.
+    fn flush(&mut self, session: &mut Session) {
+        if let Some(sample) = self.sample.take() {
+            let key = format!("sample:{}:{}:{}", session.id, sample.turn, sample.step);
+            let model = self.model.clone();
+            record(
+                session,
+                sample.tokens,
+                model,
+                sample.time,
+                sample.start,
+                Some(key),
+            );
+        }
+    }
 }
 
 fn record(
     session: &mut Session,
-    usage: &Usage,
+    tokens: Tokens,
     model: Option<String>,
     ts: i64,
     start: Option<i64>,
     key: Option<String>,
 ) {
-    let tokens = usage.tokens();
     if tokens.is_empty() {
         return;
     }

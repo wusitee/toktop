@@ -79,7 +79,9 @@ Source: `usage.record` lines in each agent's `wire.jsonl`, both `turn` scope (mo
 
 ## dsh
 
-Source: `usage` on `assistant/message` lines (one per model step) and `compaction/summary` lines (the summarization call, under its own `model`). `inputTokens` (uncached) and `cacheReadTokens` are disjoint; `outputTokens` includes `reasoningTokens`, which is split out. The model is the message's `source.model`.
+Source: `usage` on `assistant/message` lines (one per model step) and `compaction/summary` lines (the summarization call, under its own `model`). `inputTokens` (uncached), `cacheReadTokens` and `cacheWriteTokens` are disjoint; `outputTokens` includes `reasoningTokens`, which is split out. The model is the message's `source.model`.
+
+- As in dsh's own totals, a step's `usage` chunk counts even when the request fails before its message, under the model of the latest `request/context`. The step's message replaces that sample.
 
 - A fork child begins with `seedLength` events copied from its parent; lines with a smaller `seq` are skipped.
 - Events are keyed by message id or compaction id, and counted once across files.
@@ -93,7 +95,7 @@ Each event may carry a response time (`duration_ms`): from the request, the late
 - **Codex.** The request starts at the latest input `response_item` (a user message or a tool call output) and ends at the last output item (reasoning, an assistant message or any `*_call`) before its `token_count`. Tool outputs written after the model's output start the next request; order in the log decides, not timestamps, which often tie. Only an accepted usage snapshot or a counter reset ends a request that has output, so unchanged or rate-limit-only snapshots mid-response do not. `task_complete` and `turn_aborted` clear pending timing. Each input starts at most one request; a response with no unused input before it has no duration. Both are read from the line prefix (`{"timestamp":…,"type":"response_item","payload":{"type":…`), so other rows are never JSON-parsed.
 - **Pi.** The message `timestamp` (set when the response starts) to the entry's write time.
 - **Kimi Code.** The first `llm.request` of the agent loop (`kind` `loop`) since the previous turn usage, to the next `turn`-scope `usage.record`. `turn.prompt` and `turn.ended` drop a request left unanswered by a cancelled, failed or interrupted turn. Retries are included; side calls and `session`-scope usage neither start nor end a request.
-- **dsh.** The step's `step/start` to its `assistant/message`; a compaction's `compaction/start` to its summary.
+- **dsh.** The step's `step/start` to its `assistant/message` (or usage sample); a compaction's `compaction/start` to its summary.
 - **Antigravity.** No response time.
 
 Times of zero or over 15 minutes (a lost request start) are discarded. Average speed is the ratio of sums, output plus reasoning tokens over response time, across timed requests; untimed requests do not count.

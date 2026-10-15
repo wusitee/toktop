@@ -1236,17 +1236,31 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
         "\n",
         r#"{"type":"user/message","seq":4,"time":1790848800002,"data":{"content":[{"type":"text","text":"Review  the\ndiff"}],"source":{"kind":"user"},"role":"user"}}"#,
         "\n",
-        r#"{"type":"step/start","seq":5,"time":1790848801000,"data":{"turn":1,"step":1}}"#,
+        r#"{"type":"request/context","seq":5,"time":1790848800500,"data":{"provider":"deepseek-official","model":"deepseek-v4-pro","contextWindow":1000000}}"#,
         "\n",
-        r#"{"type":"assistant/message","seq":6,"time":1790848803000,"data":{"turn":1,"step":1,"message":{"id":"m1","source":{"kind":"model","model":"deepseek-v4-pro"}},"usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"reasoningTokens":20}}}"#,
+        r#"{"type":"step/start","seq":6,"time":1790848801000,"data":{"turn":1,"step":1}}"#,
+        "\n",
+        // The message's usage replaces the step's sample.
+        r#"{"type":"assistant/chunk","seq":7,"time":1790848802900,"data":{"turn":1,"step":1,"chunk":{"type":"usage","usage":{"inputTokens":1,"outputTokens":1,"cacheReadTokens":0,"reasoningTokens":0}}}}"#,
+        "\n",
+        r#"{"type":"assistant/message","seq":8,"time":1790848803000,"data":{"turn":1,"step":1,"message":{"id":"m1","source":{"kind":"model","model":"deepseek-v4-pro"}},"usage":{"inputTokens":100,"outputTokens":50,"cacheReadTokens":900,"cacheWriteTokens":7,"reasoningTokens":20}}}"#,
+        "\n",
+        r#"{"type":"step/end","seq":9,"time":1790848803001,"data":{"turn":1,"step":1}}"#,
+        "\n",
+        // A request that fails after reporting usage still counts.
+        r#"{"type":"step/start","seq":10,"time":1790848804000,"data":{"turn":1,"step":2}}"#,
+        "\n",
+        r#"{"type":"assistant/chunk","seq":11,"time":1790848805000,"data":{"turn":1,"step":2,"chunk":{"type":"usage","usage":{"inputTokens":30,"outputTokens":3,"cacheReadTokens":0,"reasoningTokens":0}}}}"#,
+        "\n",
+        r#"{"type":"step/end","seq":12,"time":1790848805001,"data":{"turn":1,"step":2}}"#,
         "\n",
     ));
     let compaction = zstd_frame(concat!(
-        r#"{"type":"compaction/start","seq":7,"time":1790848810000,"data":{"compactionId":"c1"}}"#,
+        r#"{"type":"compaction/start","seq":13,"time":1790848810000,"data":{"compactionId":"c1"}}"#,
         "\n",
-        r#"{"type":"compaction/summary","seq":8,"time":1790848814000,"data":{"compactionId":"c1","model":"deepseek-v4-flash","usage":{"inputTokens":500,"outputTokens":40,"cacheReadTokens":0,"reasoningTokens":0}}}"#,
+        r#"{"type":"compaction/summary","seq":14,"time":1790848814000,"data":{"compactionId":"c1","model":"deepseek-v4-flash","usage":{"inputTokens":500,"outputTokens":40,"cacheReadTokens":0,"reasoningTokens":0}}}"#,
         "\n",
-        r#"{"type":"session/title","seq":9,"time":1790848815000,"data":{"title":" Diff review "}}"#,
+        r#"{"type":"session/title","seq":15,"time":1790848815000,"data":{"title":" Diff review ","source":{"kind":"llm","model":{"provider":"deepseek-official","model":"deepseek-v4-flash"}}}}"#,
         "\n",
     ));
     let mut bytes = [header, batch].concat();
@@ -1260,7 +1274,7 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
     assert_eq!(session.parent.as_deref(), Some("session-p"));
     assert_eq!(session.project.as_deref(), Some("/work/app"));
     assert_eq!(session.prompt.as_deref(), Some("Review the diff"));
-    assert_eq!(session.events.len(), 1);
+    assert_eq!(session.events.len(), 2);
     let event = &session.events[0];
     assert_eq!(
         event.tokens,
@@ -1268,13 +1282,18 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
             input: 100,
             output: 30,
             cache_read: 900,
-            cache_write: 0,
+            cache_write: 7,
             cache_write_1h: 0,
             reasoning: 20,
         }
     );
     assert_eq!(event.duration_ms, 2000);
     assert_eq!(event.key.as_deref(), Some("message:m1"));
+    let failed = &session.events[1];
+    assert_eq!(failed.tokens.total(), 33);
+    assert_eq!(session.models[failed.model as usize], "deepseek-v4-pro");
+    assert_eq!(failed.duration_ms, 1000);
+    assert_eq!(failed.key.as_deref(), Some("sample:session-c:1:2"));
 
     std::fs::OpenOptions::new()
         .append(true)
@@ -1283,8 +1302,8 @@ fn dsh_reads_zstd_frames_skipping_fork_seed() {
         .write_all(&compaction[10..])
         .unwrap();
     assert!(parse::parse_appended(&path, &mut session, &mut cursor).unwrap());
-    assert_eq!(session.events.len(), 2);
-    let summary = &session.events[1];
+    assert_eq!(session.events.len(), 3);
+    let summary = &session.events[2];
     assert_eq!(session.models[summary.model as usize], "deepseek-v4-flash");
     assert_eq!(summary.tokens.total(), 540);
     assert_eq!(summary.duration_ms, 4000);
