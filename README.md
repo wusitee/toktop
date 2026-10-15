@@ -23,6 +23,7 @@ Install the binary, desktop entry and icons for your user:
 install -Dm755 target/release/toktop ~/.local/bin/toktop
 install -Dm644 data/io.github.wusitee.toktop.desktop ~/.local/share/applications/io.github.wusitee.toktop.desktop
 cp -r data/icons ~/.local/share/
+touch ~/.local/share/icons/hicolor  # invalidate a stale icon cache
 ```
 
 ## Usage
