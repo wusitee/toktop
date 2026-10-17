@@ -191,6 +191,7 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(today_summary.by_project.len(), 1);
     assert_eq!(today_summary.sessions[0].title, "Indexed title");
     assert!((today_summary.rate_per_min - 3.0 / 5.0).abs() < 1e-9);
+    assert_eq!(today_summary.recent_speed, Some(12.5));
 
     let week = aggregate::summarize(&store, &prices, Period::ThisWeek, now);
     assert_eq!(week.total.tokens.input, 123);
@@ -294,20 +295,27 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
 
     // Recent speed covers only the latest timed requests, whatever the period.
     let mut recent = Store::default();
+    // Events newest first, so file order differs from time order.
     let mut events: Vec<_> = (0..=aggregate::RECENT_REQUESTS as i64)
+        .rev()
         .map(|i| (ms(yesterday, 9) + i * 60_000, 0, None))
         .collect();
     events.push((now + 60_000, 0, None));
     let mut fast = session("fast", "/work/app", "gpt-6.1-sol", events);
     for (i, event) in fast.events.iter_mut().enumerate() {
-        // The oldest and a future request are slow and fall outside.
-        let slow = i == 0 || i > aggregate::RECENT_REQUESTS;
-        event.tokens.output = if slow { 1 } else { 200 };
-        event.duration_ms = 1000;
+        // The oldest and a future request are slow and fall outside; the
+        // rest alternate 100 and 300 tok/s.
+        let slow = i >= aggregate::RECENT_REQUESTS;
+        (event.tokens.output, event.duration_ms) = match (slow, i % 2) {
+            (true, _) => (1, 1000),
+            (false, 0) => (100, 1000),
+            (false, _) => (900, 3000),
+        };
     }
     recent.insert_session("/fast.jsonl".into(), Tool::Codex, fast);
     let summary = aggregate::summarize(&recent, &PriceTable::default(), Period::Today, now);
-    assert_eq!(summary.recent_speed, Some(200.0));
+    // A ratio of sums, not the 200 tok/s mean of request speeds.
+    assert_eq!(summary.recent_speed, Some(250.0));
 
     // A row whose subagent alone has usage in the period keeps the parent's
     // prompt and project.
