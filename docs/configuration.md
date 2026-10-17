@@ -19,7 +19,7 @@ rows = 5
 sessions = 5
 
 [widget.sections]     # parts of the card that are shown
-stats = true          # speed, live rate, cache and streak tiles
+stats = true          # recent speed, live rate, cache and streak tiles
 limits = true         # Codex rate limits
 breakdown = true      # models, projects and tools
 sessions = true

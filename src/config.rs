@@ -50,7 +50,7 @@ pub struct Widget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sections {
-    /// Speed, live rate, cache and streak tiles.
+    /// Recent speed, live rate, cache and streak tiles.
     pub stats: bool,
     /// Codex rate limits.
     pub limits: bool,
