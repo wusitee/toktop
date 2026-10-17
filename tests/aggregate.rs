@@ -289,7 +289,25 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
     assert_eq!(day.date, today);
     assert_eq!((day.split.sessions, day.split.models.len()), (1, 2));
     assert_eq!(summary.total.speed(), Some(100.0));
+    assert_eq!(summary.recent_speed, Some(100.0));
     assert_eq!(summary.streak_days, 2);
+
+    // Recent speed covers only the latest timed requests, whatever the period.
+    let mut recent = Store::default();
+    let mut events: Vec<_> = (0..=aggregate::RECENT_REQUESTS as i64)
+        .map(|i| (ms(yesterday, 9) + i * 60_000, 0, None))
+        .collect();
+    events.push((now + 60_000, 0, None));
+    let mut fast = session("fast", "/work/app", "gpt-6.1-sol", events);
+    for (i, event) in fast.events.iter_mut().enumerate() {
+        // The oldest and a future request are slow and fall outside.
+        let slow = i == 0 || i > aggregate::RECENT_REQUESTS;
+        event.tokens.output = if slow { 1 } else { 200 };
+        event.duration_ms = 1000;
+    }
+    recent.insert_session("/fast.jsonl".into(), Tool::Codex, fast);
+    let summary = aggregate::summarize(&recent, &PriceTable::default(), Period::Today, now);
+    assert_eq!(summary.recent_speed, Some(200.0));
 
     // A row whose subagent alone has usage in the period keeps the parent's
     // prompt and project.

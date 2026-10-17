@@ -4,7 +4,8 @@ use crate::model::{Event, RateLimits, Session, Tokens, Tool};
 use crate::pricing::{Price, PriceTable};
 use crate::store::Store;
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
-use std::collections::{HashMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Period {
@@ -244,6 +245,9 @@ pub struct Summary {
     pub daily: Vec<DayRow>,
     /// Tokens per minute over the last five minutes.
     pub rate_per_min: f64,
+    /// Output speed over the latest [`RECENT_REQUESTS`] timed requests, any
+    /// period.
+    pub recent_speed: Option<f64>,
     /// Consecutive days with usage, ending today, or yesterday when today
     /// has none yet.
     pub streak_days: u32,
@@ -253,6 +257,8 @@ pub struct Summary {
 }
 
 pub const RATE_WINDOW_MS: i64 = 5 * 60 * 1000;
+/// Timed requests covered by [`Summary::recent_speed`].
+pub const RECENT_REQUESTS: usize = 20;
 /// Days covered by [`Row::daily_speed`], ending today.
 pub const SPEED_DAYS: u64 = 30;
 
@@ -384,6 +390,8 @@ pub fn summarize<'a>(
     let mut unpriced: HashSet<String> = HashSet::new();
     let mut price_cache: HashMap<&str, Option<Price>> = HashMap::new();
     let mut recent_tokens = 0u64;
+    // Latest timed requests as (time, output tokens, duration), oldest on top.
+    let mut recent_timed: BinaryHeap<Reverse<(i64, u64, u32)>> = BinaryHeap::new();
 
     // Iterate in a stable order so cross-file duplicates always resolve to the
     // same file.
@@ -491,6 +499,13 @@ pub fn summarize<'a>(
             }
             if now_ms - event.ts <= RATE_WINDOW_MS && event.ts <= now_ms {
                 recent_tokens = recent_tokens.saturating_add(tokens.total());
+            }
+            if duration > 0 && event.ts <= now_ms {
+                let output = tokens.output.saturating_add(tokens.reasoning);
+                recent_timed.push(Reverse((event.ts, output, duration)));
+                if recent_timed.len() > RECENT_REQUESTS {
+                    recent_timed.pop();
+                }
             }
             if event.ts < start_ms {
                 continue;
@@ -640,6 +655,15 @@ pub fn summarize<'a>(
     summary.streak_days = streak(&days, today);
     summary.daily = days;
     summary.rate_per_min = recent_tokens as f64 / (RATE_WINDOW_MS as f64 / 60_000.0);
+    let recent = recent_timed.into_iter().fold(
+        Usage::default(),
+        |mut recent, Reverse((_, output, duration))| {
+            recent.timed_tokens = recent.timed_tokens.saturating_add(output);
+            recent.timed_ms = recent.timed_ms.saturating_add(u64::from(duration));
+            recent
+        },
+    );
+    summary.recent_speed = recent.speed();
     let mut unpriced: Vec<String> = unpriced.into_iter().collect();
     unpriced.sort();
     summary.unpriced = unpriced;

@@ -45,7 +45,7 @@ touch ~/.local/share/icons/hicolor  # invalidate a stale icon cache
 Run `toktop` to show the widget. On Hyprland, Sway, KDE Plasma and other compositors with wlr-layer-shell, it is a desktop widget pinned to the top-right corner below your windows; elsewhere it opens as a small window. It shows:
 
 - total tokens, cost and requests for the selected period (DAY, WEEK, MONTH, ALL)
-- average output speed (tok/s), live tokens per minute, cache hit rate and daily streak
+- recent output speed (tok/s), live tokens per minute, cache hit rate and daily streak
 - Codex rate limits left and their reset times
 - top models, projects or tools with their speed, and recent sessions with their models and subagents
 - an activity heatmap and a 30-day trend

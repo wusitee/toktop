@@ -98,7 +98,7 @@ Each event may carry a response time (`duration_ms`): from the request, the late
 - **dsh.** The step's `step/start`, or the latest `llm/retry-started`, to its `assistant/message`, `assistant/attempt` or usage sample; a compaction's `compaction/start` to its summary.
 - **Antigravity.** No response time.
 
-Times of zero or over 15 minutes (a lost request start) are discarded. Average speed is the ratio of sums, output plus reasoning tokens over response time, across timed requests; untimed requests do not count.
+Times of zero or over 15 minutes (a lost request start) are discarded. Average speed is the ratio of sums, output plus reasoning tokens over response time, across timed requests; untimed requests do not count. Weighting by tokens keeps short tool-call responses, dominated by time to first token, from dragging it down. Rows, sessions and model days average over their own requests; the widget's SPEED tile averages the latest 20 timed requests, whatever the period, so it follows the model in use.
 
 ## Sessions
 

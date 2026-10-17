@@ -14,7 +14,7 @@ use chrono::{Days, Local};
 use gtk::prelude::*;
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
-use toktop::aggregate::{Period, Row, SessionRow, Summary, Usage};
+use toktop::aggregate::{Period, RECENT_REQUESTS, Row, SessionRow, Summary, Usage};
 use toktop::config::{self, Sections};
 use toktop::format;
 use toktop::model::{LimitWindow, Tool};
@@ -479,8 +479,11 @@ impl Widget {
         // Statistics tiles.
         let speed = Tile::new(
             "SPEED",
-            "Average output speed: output and reasoning tokens per second, \
-             from each request to its last output",
+            &format!(
+                "Recent output speed: output and reasoning tokens per second \
+                 over the latest {RECENT_REQUESTS} timed requests, from each \
+                 request to its last output"
+            ),
         );
         let rate = Tile::new("LIVE", "Tokens per minute over the last five minutes");
         let cache = Tile::new("CACHE", "Share of prompt tokens served from cache");
@@ -886,9 +889,11 @@ impl Widget {
             "Idle for five minutes".to_owned()
         }));
 
-        self.speed
-            .value
-            .set_label(&total.speed().map_or_else(|| "—".to_owned(), format::speed));
+        self.speed.value.set_label(
+            &summary
+                .recent_speed
+                .map_or_else(|| "—".to_owned(), format::speed),
+        );
         self.rate.value.set_label(&if live {
             format!("{}/min", format::tokens(summary.rate_per_min as u64))
         } else {
