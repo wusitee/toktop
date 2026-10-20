@@ -39,9 +39,9 @@ pub struct Widget {
     /// Monitor connector name, such as `DP-1`. Empty lets the compositor choose.
     pub output: String,
     pub width: i32,
-    /// Rows in the models, projects and tools list.
+    /// Visible rows before the models, projects and tools list scrolls.
     pub rows: usize,
-    /// Recent sessions shown.
+    /// Recent sessions shown when collapsed.
     pub sessions: usize,
     pub sections: Sections,
 }

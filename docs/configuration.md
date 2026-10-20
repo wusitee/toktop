@@ -37,8 +37,8 @@ trend = true
 | `widget.margin` | `16` | Distance in pixels from the anchored edges. |
 | `widget.output` | `""` | Monitor to show a layer widget on, by connector name (`hyprctl monitors`, `swaymsg -t get_outputs`). |
 | `widget.width` | `380` | Card width in pixels. |
-| `widget.rows` | `5` | Rows in the models, projects and tools list. |
-| `widget.sessions` | `5` | Recent sessions shown; `0` hides the section. Expanded, the list scrolls through up to 100 sessions of the period in one more row's height. |
+| `widget.rows` | `5` | Visible rows in the models, projects and tools list; scroll to reach up to 100 entries in the selected breakdown. |
+| `widget.sessions` | `5` | Recent sessions shown when collapsed; `0` hides the section. The list starts expanded and scrolls through up to 100 sessions of the period in one more row's height. Use the chevron to collapse or expand it. |
 | `widget.sections.*` | `true` | Whether each part of the card is shown. |
 
 Edits to the file take effect at the next start; the settings window applies them immediately. The `[window]` table of earlier versions is accepted and ignored.

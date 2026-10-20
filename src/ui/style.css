@@ -198,19 +198,19 @@ progressbar.low progress {
   background-color: @toktop_warn;
 }
 
-/* Expanded sessions list. */
-.sessions-scroll > scrollbar.vertical {
+/* Scrolling breakdown and expanded sessions lists. */
+.list-scroll > scrollbar.vertical {
   background: none;
   border: none;
   margin-left: 6px;
 }
 
-.sessions-scroll > scrollbar.vertical > range > trough {
+.list-scroll > scrollbar.vertical > range > trough {
   min-width: 4px;
   background: none;
 }
 
-.sessions-scroll > scrollbar.vertical > range > trough > slider {
+.list-scroll > scrollbar.vertical > range > trough > slider {
   min-width: 4px;
   margin: 0;
   border: none;
@@ -218,7 +218,7 @@ progressbar.low progress {
   background-color: alpha(@toktop_fg, 0.25);
 }
 
-.sessions-scroll > scrollbar.vertical > range > trough > slider:hover {
+.list-scroll > scrollbar.vertical > range > trough > slider:hover {
   background-color: alpha(@toktop_fg, 0.45);
 }
 

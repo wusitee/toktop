@@ -1,10 +1,10 @@
 //! The toktop card: totals, rate limits, top models and recent sessions,
 //! activity heatmap and trend.
 //!
-//! Every list has a fixed number of row slots built once; updates only
-//! change label text and visibility, so a live update never rebuilds
-//! widgets and stays cheap. The sessions list grows its slots the first time
-//! it is expanded.
+//! Lists keep the row slots they have built; updates only change label text
+//! and visibility, so a live update never rebuilds widgets and stays cheap.
+//! The breakdown list grows its slots the first time it holds more rows, the
+//! sessions list the first time it is expanded.
 //!
 //! Rows and chart days open a [`Detail`] card when clicked.
 
@@ -28,6 +28,8 @@ const SWITCHER: [(Period, &str); 4] = [
     (Period::AllTime, "ALL"),
 ];
 const TREND_DAYS: u64 = 30;
+/// Most models, projects or tools listed; past `rows` the list scrolls.
+const MAX_ROWS: usize = 100;
 /// Most sessions listed when the sessions section is expanded.
 const MAX_SESSIONS: usize = 100;
 
@@ -132,6 +134,24 @@ pub(super) fn section_header(
 
 pub(super) fn separator() -> gtk::Separator {
     gtk::Separator::new(gtk::Orientation::Horizontal)
+}
+
+/// Scrolls `list` vertically once its height is capped. The scrollbar takes
+/// its own column instead of covering the counts.
+fn list_scroll(list: &gtk::Box) -> gtk::ScrolledWindow {
+    gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vscrollbar_policy(gtk::PolicyType::Never)
+        .overlay_scrolling(false)
+        .propagate_natural_height(true)
+        .child(list)
+        .css_classes(["list-scroll"])
+        .build()
+}
+
+/// Natural height of one row of a list whose rows are all alike.
+fn row_height(row: &gtk::Box) -> i32 {
+    row.measure(gtk::Orientation::Vertical, -1).1
 }
 
 pub(super) fn display_cost(cost: f64, available: bool) -> String {
@@ -401,7 +421,11 @@ pub struct Widget {
     limit_slots: [LimitSlot; 2],
     breakdown: Cell<Breakdown>,
     breakdown_tabs: Vec<(Breakdown, gtk::ToggleButton)>,
-    rows: Vec<BreakdownSlot>,
+    /// Breakdown rows shown before the list scrolls.
+    row_limit: usize,
+    rows: RefCell<Vec<BreakdownSlot>>,
+    rows_list: gtk::Box,
+    rows_scroll: gtk::ScrolledWindow,
     rows_empty: gtk::Label,
     /// Sessions listed while collapsed.
     session_limit: usize,
@@ -543,13 +567,11 @@ impl Widget {
         let breakdown = vbox(0);
         breakdown.add_css_class("section");
         breakdown.append(&tabs);
-        let rows: Vec<BreakdownSlot> = (0..settings.rows.max(1))
-            .map(|_| BreakdownSlot::new())
-            .collect();
-        for slot in &rows {
-            slot.root.set_visible(false);
-            breakdown.append(&slot.root);
-        }
+        // Longer lists scroll within `rows` rows.
+        let rows_list = vbox(0);
+        let rows_scroll = list_scroll(&rows_list);
+        rows_scroll.set_vscrollbar_policy(gtk::PolicyType::Automatic);
+        breakdown.append(&rows_scroll);
         let rows_empty = label(&["dim", "empty"]);
         rows_empty.set_label("No usage in this period");
         rows_empty.set_visible(false);
@@ -578,15 +600,7 @@ impl Widget {
         // Expanded, the list scrolls within one row more than it shows
         // collapsed.
         let sessions_list = vbox(0);
-        // The scrollbar takes its own column instead of covering the counts.
-        let sessions_scroll = gtk::ScrolledWindow::builder()
-            .hscrollbar_policy(gtk::PolicyType::Never)
-            .vscrollbar_policy(gtk::PolicyType::Never)
-            .overlay_scrolling(false)
-            .propagate_natural_height(true)
-            .child(&sessions_list)
-            .css_classes(["sessions-scroll"])
-            .build();
+        let sessions_scroll = list_scroll(&sessions_list);
         sessions_box.append(&sessions_scroll);
         let sessions_empty = label(&["dim", "empty"]);
         sessions_empty.set_label("No sessions in this period");
@@ -639,7 +653,10 @@ impl Widget {
             limit_slots,
             breakdown: Cell::new(Breakdown::Models),
             breakdown_tabs,
-            rows,
+            row_limit: settings.rows.max(1),
+            rows: RefCell::default(),
+            rows_list,
+            rows_scroll,
             rows_empty,
             session_limit: sessions,
             sessions: RefCell::default(),
@@ -665,12 +682,14 @@ impl Widget {
                 widget.set_expanded(button.is_active());
             }
         });
+        widget.sessions_more.set_active(true);
         for (kind, button) in &widget.breakdown_tabs {
             let kind = *kind;
             let weak = Rc::downgrade(&widget);
             button.connect_toggled(move |button| {
                 if let (true, Some(widget)) = (button.is_active(), weak.upgrade()) {
                     widget.breakdown.set(kind);
+                    widget.rows_scroll.vadjustment().set_value(0.0);
                     let last = widget.last.borrow().clone();
                     if let Some(summary) = last {
                         widget.update_breakdown(&summary);
@@ -686,27 +705,8 @@ impl Widget {
         self.detail_card.set_max_height(height);
     }
 
-    /// Opens detail cards from breakdown rows and chart days.
+    /// Opens detail cards from chart days.
     fn connect_details(self: &Rc<Self>) {
-        for (index, slot) in self.rows.iter().enumerate() {
-            self.clickable(&slot.root, false, move |widget, summary, _, _| match widget
-                .breakdown
-                .get()
-            {
-                Breakdown::Models => summary
-                    .by_model
-                    .get(index)
-                    .map(|row| Selection::Model(row.key.clone())),
-                Breakdown::Projects => summary
-                    .by_project
-                    .get(index)
-                    .map(|row| Selection::Project(row.key.clone())),
-                Breakdown::Tools => summary
-                    .by_tool
-                    .get(index)
-                    .map(|row| Selection::Tool(row.tool)),
-            });
-        }
         self.clickable(&self.heatmap.area, true, |widget, _, x, y| {
             widget.heatmap.date_at(x, y).map(Selection::Day)
         });
@@ -784,6 +784,33 @@ impl Widget {
         self.detail_card.show(selection, top, height, summary);
     }
 
+    fn add_row_slot(self: &Rc<Self>) {
+        let mut slots = self.rows.borrow_mut();
+        let index = slots.len();
+        let slot = BreakdownSlot::new();
+        slot.root.set_visible(false);
+        self.rows_list.append(&slot.root);
+        self.clickable(
+            &slot.root,
+            false,
+            move |widget, summary, _, _| match widget.breakdown.get() {
+                Breakdown::Models => summary
+                    .by_model
+                    .get(index)
+                    .map(|row| Selection::Model(row.key.clone())),
+                Breakdown::Projects => summary
+                    .by_project
+                    .get(index)
+                    .map(|row| Selection::Project(row.key.clone())),
+                Breakdown::Tools => summary
+                    .by_tool
+                    .get(index)
+                    .map(|row| Selection::Tool(row.tool)),
+            },
+        );
+        slots.push(slot);
+    }
+
     fn add_session_slot(self: &Rc<Self>) {
         let mut slots = self.sessions.borrow_mut();
         let index = slots.len();
@@ -809,12 +836,6 @@ impl Widget {
             "Show more sessions"
         }));
         if expanded {
-            // Rows are one line each, so all have the first one's height.
-            let row = self.sessions.borrow().first().map_or(0, |slot| {
-                slot.root.measure(gtk::Orientation::Vertical, -1).1
-            });
-            self.sessions_scroll
-                .set_max_content_height(row * (self.session_limit as i32 + 1));
             self.sessions_scroll
                 .set_vscrollbar_policy(gtk::PolicyType::Automatic);
         } else {
@@ -941,7 +962,7 @@ impl Widget {
         self.limit_slots[1].set(limits.secondary.as_ref(), now_s);
     }
 
-    fn update_breakdown(&self, summary: &Summary) {
+    fn update_breakdown(self: &Rc<Self>, summary: &Summary) {
         let total = summary.total.tokens.total().max(1) as f64;
         let items: Vec<(&str, &str, &Usage)> = match self.breakdown.get() {
             Breakdown::Models => summary
@@ -960,8 +981,13 @@ impl Widget {
                 .map(|row| (tool_family(row.tool), row.tool.label(), &row.usage))
                 .collect(),
         };
-        for (index, slot) in self.rows.iter().enumerate() {
-            let Some((family, name, usage)) = items.get(index) else {
+        let shown = items.len().min(MAX_ROWS);
+        while self.rows.borrow().len() < shown {
+            self.add_row_slot();
+        }
+        let rows = self.rows.borrow();
+        for (index, slot) in rows.iter().enumerate() {
+            let Some((family, name, usage)) = items.get(index).filter(|_| index < shown) else {
                 slot.root.set_visible(false);
                 continue;
             };
@@ -974,6 +1000,11 @@ impl Widget {
             slot.share
                 .set_label(&format::percent(usage.tokens.total() as f64 / total));
         }
+        if let Some(first) = rows.first().filter(|_| shown > 0) {
+            self.rows_scroll
+                .set_max_content_height(row_height(&first.root) * self.row_limit as i32);
+        }
+        self.rows_scroll.set_visible(shown > 0);
         self.rows_empty.set_visible(items.is_empty());
     }
 
@@ -998,6 +1029,12 @@ impl Widget {
                 None => slot.root.set_visible(false),
             }
         }
+        if self.sessions_more.is_active() && shown > 0 {
+            let row = row_height(&self.sessions.borrow()[0].root);
+            self.sessions_scroll
+                .set_max_content_height(row * (self.session_limit as i32 + 1));
+        }
+        self.sessions_scroll.set_visible(shown > 0);
         self.sessions_more.set_visible(
             self.sessions_more.is_active() || summary.sessions.len() > self.session_limit,
         );
