@@ -81,7 +81,7 @@ fn print(period: Option<&str>) {
         "{}: {} tokens, {}, {} requests",
         period.label(),
         format::tokens(total.tokens.total()),
-        cost(total.cost),
+        cost(total.cost.total()),
         total.requests
     );
     if let Some(value) = total.speed() {
@@ -93,7 +93,7 @@ fn print(period: Option<&str>) {
             "  {:<14} {:>8}  {:>9}  {:>9}",
             row.tool.label(),
             format::tokens(row.usage.tokens.total()),
-            cost(row.usage.cost),
+            cost(row.usage.cost.total()),
             speed(&row.usage)
         );
     }
@@ -107,7 +107,7 @@ fn print(period: Option<&str>) {
                 "  {:<28} {:>8}  {:>9}  {:>9}",
                 row.label,
                 format::tokens(row.usage.tokens.total()),
-                cost(row.usage.cost),
+                cost(row.usage.cost.total()),
                 speed(&row.usage)
             );
         }

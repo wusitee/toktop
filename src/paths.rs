@@ -2,7 +2,7 @@
 
 use crate::model::Tool;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn home() -> PathBuf {
     env::var_os("HOME").map(PathBuf::from).unwrap_or_default()
@@ -36,10 +36,11 @@ pub fn source_roots(tool: Tool) -> Vec<PathBuf> {
             let base = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
             vec![base.join("sessions"), base.join("archived_sessions")]
         }
-        Tool::Antigravity => antigravity_homes()
-            .into_iter()
-            .map(|base| base.join("conversations"))
-            .collect(),
+        Tool::Antigravity => vec![
+            home.join(".gemini/antigravity/conversations"),
+            home.join(".gemini/antigravity-cli/conversations"),
+            t3_antigravity_root(),
+        ],
         Tool::Pi => vec![env_dir("PI_CODING_AGENT_SESSION_DIR").unwrap_or_else(|| {
             env_dir("PI_CODING_AGENT_DIR")
                 .unwrap_or_else(|| home.join(".pi").join("agent"))
@@ -61,10 +62,37 @@ pub fn kimi_sessions() -> PathBuf {
         .join("sessions")
 }
 
-/// Antigravity IDE and CLI data directories.
+fn t3_antigravity_root() -> PathBuf {
+    home().join(".t3/userdata/providers/antigravity")
+}
+
+/// Keep T3 provider scans and watches in conversation directories, excluding
+/// brain artifacts, configuration and credentials. Other roots are unfiltered.
+pub fn is_source_path(path: &Path) -> bool {
+    let root = t3_antigravity_root();
+    let Ok(relative) = path.strip_prefix(&root) else {
+        return true;
+    };
+    let mut parts = relative.iter();
+    parts.next(); // Provider instance.
+    let Some(app) = parts.next() else { return true };
+    app == "antigravity-acp" && parts.next().is_none_or(|part| part == "conversations")
+}
+
+/// Antigravity IDE, CLI and T3 provider data directories.
 pub fn antigravity_homes() -> Vec<PathBuf> {
     let gemini = home().join(".gemini");
-    vec![gemini.join("antigravity"), gemini.join("antigravity-cli")]
+    let mut homes = vec![gemini.join("antigravity"), gemini.join("antigravity-cli")];
+    if let Ok(providers) = std::fs::read_dir(t3_antigravity_root()) {
+        let mut isolated: Vec<_> = providers
+            .flatten()
+            .map(|provider| provider.path().join("antigravity-acp"))
+            .filter(|path| path.is_dir())
+            .collect();
+        isolated.sort();
+        homes.extend(isolated);
+    }
+    homes
 }
 
 /// Codex's thread index, which carries thread titles.

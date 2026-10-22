@@ -351,11 +351,21 @@ impl Shell {
         let config = self.config.borrow().clone();
         let settings = &config.widget;
         let shell = Rc::downgrade(self);
-        let widget = widget::Widget::new(config.period, settings, move |period| {
-            if let Some(shell) = shell.upgrade() {
-                shell.set_period(period);
-            }
-        });
+        let day_shell = shell.clone();
+        let widget = widget::Widget::new(
+            config.period,
+            settings,
+            move |period| {
+                if let Some(shell) = shell.upgrade() {
+                    shell.set_period(period);
+                }
+            },
+            move |day| {
+                if let Some(shell) = day_shell.upgrade() {
+                    shell.send(Msg::DetailDay(day));
+                }
+            },
+        );
 
         let window = gtk::ApplicationWindow::builder()
             .application(&self.app)
@@ -568,7 +578,7 @@ fn tray_state(summary: &Summary) -> tray::State {
         format::tokens(total.tokens.total())
     );
     if summary.prices_available {
-        title.push_str(&format!(" · {}", format::cost(total.cost)));
+        title.push_str(&format!(" · {}", format::cost(total.cost.total())));
     }
     let mut lines = Vec::new();
     if summary.rate_per_min > 0.0 {

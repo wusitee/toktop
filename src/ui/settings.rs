@@ -155,7 +155,12 @@ fn sources(config: &Config, change: &Change) -> adw::PreferencesGroup {
 
 fn card(config: &Config, change: &Change) -> adw::PreferencesGroup {
     let group = group("Card", "Parts of the widget that are shown.");
-    let entries: [(&str, &str, Field); 5] = [
+    let entries: [(&str, &str, Field); 6] = [
+        (
+            "Cost by type",
+            "Input, cache and output shares of the cost",
+            |s| &mut s.cost,
+        ),
         ("Statistics", "Speed, live rate, cache and streak", |s| {
             &mut s.stats
         }),
@@ -170,7 +175,7 @@ fn card(config: &Config, change: &Change) -> adw::PreferencesGroup {
     ];
     let mut sections = config.widget.sections;
     for (index, (title, subtitle, field)) in entries.into_iter().enumerate() {
-        if index == 3 {
+        if index == 4 {
             // Also hidden by a count of zero.
             let change = change.clone();
             group.add(&switch(

@@ -134,6 +134,9 @@ impl Watcher {
     }
 
     fn add_tree(&mut self, dir: &Path) {
+        if !crate::paths::is_source_path(dir) {
+            return;
+        }
         self.add(dir, TREE_MASK);
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
@@ -292,6 +295,11 @@ impl Watcher {
                 }
                 let Some(name) = event.name else { continue };
                 let path = dir.join(name);
+                if !crate::paths::is_source_path(&path)
+                    && !self.files.contains(&crate::store::source_path(&path))
+                {
+                    continue;
+                }
                 if event.mask.contains(EventMask::ISDIR) {
                     // Ancestor watches also see unrelated sibling directories.
                     if !self.in_root(&path)

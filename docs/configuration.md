@@ -19,6 +19,7 @@ rows = 5
 sessions = 5
 
 [widget.sections]     # parts of the card that are shown
+cost = true           # cost by input, cache read, cache write and output
 stats = true          # recent speed, live rate, cache and streak tiles
 limits = true         # Codex rate limits
 breakdown = true      # models, projects and tools
@@ -94,6 +95,7 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 | `toktop_accent` | Heatmap, trend line and limit bars (the charts draw in the CSS `color` of `.heatmap` and `.trend`) |
 | `toktop_live`, `toktop_warn` | Live indicator; price notices and nearly exhausted limits |
 | `toktop_claude`, `toktop_openai`, `toktop_gemini`, `toktop_deepseek`, `toktop_pi`, `toktop_kimi`, `toktop_other` | Model and tool dots (`.dot.claude`, …) |
+| `toktop_input`, `toktop_cache_read`, `toktop_cache_write`, `toktop_output` | Token kinds in the cost-by-type bar and the detail cards' token and cost bars (each bar draws in the CSS `color` of its `.kind-swatch` legend marks) |
 
 ## Command line
 

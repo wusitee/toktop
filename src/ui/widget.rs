@@ -8,7 +8,7 @@
 //!
 //! Rows and chart days open a [`Detail`] card when clicked.
 
-use super::chart::{self, Heatmap, Trend};
+use super::chart::{self, Heatmap, KindSplit, Trend};
 use super::detail::{Detail, Selection};
 use chrono::{Days, Local};
 use gtk::prelude::*;
@@ -137,16 +137,29 @@ pub(super) fn separator() -> gtk::Separator {
 }
 
 /// Scrolls `list` vertically once its height is capped. The scrollbar takes
-/// its own column instead of covering the counts.
+/// its own column instead of covering the counts. It is shown only while the
+/// list overflows, marked by the `scrolling` class, so the stylesheet can
+/// keep the list's width the same either way.
 fn list_scroll(list: &gtk::Box) -> gtk::ScrolledWindow {
-    gtk::ScrolledWindow::builder()
+    let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Never)
         .overlay_scrolling(false)
         .propagate_natural_height(true)
         .child(list)
         .css_classes(["list-scroll"])
-        .build()
+        .build();
+    let target = scroll.downgrade();
+    scroll.vadjustment().connect_changed(move |adjustment| {
+        if let Some(scroll) = target.upgrade() {
+            if adjustment.upper() > adjustment.page_size() {
+                scroll.add_css_class("scrolling");
+            } else {
+                scroll.remove_css_class("scrolling");
+            }
+        }
+    });
+    scroll
 }
 
 /// Natural height of one row of a list whose rows are all alike.
@@ -408,8 +421,10 @@ pub struct Widget {
     live: gtk::Box,
     caption: gtk::Label,
     total: Count,
+    cost: gtk::Label,
     detail: gtk::Label,
     notice: gtk::Label,
+    cost_split: KindSplit,
     speed: Tile,
     rate: Tile,
     cache: Tile,
@@ -435,7 +450,7 @@ pub struct Widget {
     sessions_more: gtk::ToggleButton,
     sessions_empty: gtk::Label,
     sessions_count: gtk::Label,
-    detail_card: Detail,
+    detail_card: Rc<Detail>,
     heatmap: Heatmap,
     active_days: gtk::Label,
     trend: Trend,
@@ -450,6 +465,7 @@ impl Widget {
         selected: Period,
         settings: &config::Widget,
         on_period: impl Fn(Period) + 'static,
+        on_day: impl Fn(Option<chrono::NaiveDate>) + 'static,
     ) -> Rc<Widget> {
         let sections = settings.sections;
         let sessions = settings.shown_sessions();
@@ -491,14 +507,35 @@ impl Widget {
         // Hero: total tokens and cost.
         let caption = label(&["caption", "hero-caption"]);
         let total = Count::new("hero");
+        let tokens = vbox(0);
+        tokens.set_hexpand(true);
+        tokens.append(&caption);
+        tokens.append(&total.label);
+        let cost_caption = label(&["caption", "hero-caption"]);
+        cost_caption.set_label("TOTAL COST");
+        cost_caption.set_xalign(1.0);
+        let cost = label(&["hero"]);
+        cost.set_xalign(1.0);
+        let costs = vbox(0);
+        costs.append(&cost_caption);
+        costs.append(&cost);
+        let totals = hbox(16);
+        totals.append(&tokens);
+        totals.append(&costs);
+        root.append(&totals);
         let detail = label(&["dim"]);
         let notice = label(&["caption", "notice"]);
         notice.set_wrap(true);
         notice.set_max_width_chars(40);
         notice.set_visible(false);
-        for widget in [&caption, &total.label, &detail, &notice] {
+        for widget in [&detail, &notice] {
             root.append(widget);
         }
+
+        // Cost by token kind.
+        let cost_split = KindSplit::new(format::cost);
+        cost_split.root.set_visible(false);
+        root.append(&cost_split.root);
 
         // Statistics tiles.
         let speed = Tile::new(
@@ -632,7 +669,7 @@ impl Widget {
         trend_box.set_visible(sections.trend);
         root.append(&trend_box);
 
-        let detail_card = Detail::new(&root, settings.anchor, settings.width);
+        let detail_card = Detail::new(&root, settings.anchor, settings.width, on_day);
         let widget = Rc::new(Widget {
             detail_card,
             root,
@@ -640,8 +677,10 @@ impl Widget {
             live,
             caption,
             total,
+            cost,
             detail,
             notice,
+            cost_split,
             speed,
             rate,
             cache,
@@ -772,7 +811,7 @@ impl Widget {
         selection: Selection,
         source: &impl IsA<gtk::Widget>,
         y: Option<f64>,
-        summary: &Summary,
+        summary: &Rc<Summary>,
     ) {
         let Some(bounds) = source.compute_bounds(&self.root) else {
             return;
@@ -877,11 +916,10 @@ impl Widget {
             summary.period.label().to_uppercase()
         ));
         self.total.set(total.tokens.total());
-        self.detail.set_label(&format!(
-            "{} · {} requests",
-            display_cost(total.cost, available),
-            format::grouped(total.requests)
-        ));
+        self.cost
+            .set_label(&display_cost(total.cost.total(), available));
+        self.detail
+            .set_label(&format!("{} requests", format::grouped(total.requests)));
         let notice = if !available {
             Some("Costs hidden until the price list downloads".to_owned())
         } else if !summary.unpriced.is_empty() {
@@ -894,6 +932,11 @@ impl Widget {
         };
         self.notice.set_visible(notice.is_some());
         self.notice.set_label(notice.as_deref().unwrap_or_default());
+        let split = self.sections.cost && available && total.cost.total() > 0.0;
+        self.cost_split.root.set_visible(split);
+        if split {
+            self.cost_split.set(chart::cost_parts(&total.cost));
+        }
 
         let live = summary.rate_per_min > 0.0;
         if live {
@@ -1053,7 +1096,7 @@ impl Widget {
         let day = |date, usage: Option<&Usage>| chart::Day {
             date,
             tokens: usage.map_or(0, |usage| usage.tokens.total()),
-            cost: available.then(|| usage.map_or(0.0, |usage| usage.cost)),
+            cost: available.then(|| usage.map_or(0.0, |usage| usage.cost.total())),
         };
         if self.sections.activity {
             self.heatmap.set(

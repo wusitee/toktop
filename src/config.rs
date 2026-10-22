@@ -50,6 +50,8 @@ pub struct Widget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Sections {
+    /// Total cost split into input, cache read, cache write and output.
+    pub cost: bool,
     /// Recent speed, live rate, cache and streak tiles.
     pub stats: bool,
     /// Codex rate limits.
@@ -93,6 +95,7 @@ impl Widget {
 impl Default for Sections {
     fn default() -> Self {
         Sections {
+            cost: true,
             stats: true,
             limits: true,
             breakdown: true,

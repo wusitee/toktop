@@ -1029,7 +1029,7 @@ fn codex_service_tiers_follow_thread_snapshots_and_request_overrides() {
     store.insert_session(path, Tool::Codex, session);
     let summary =
         toktop::aggregate::summarize(&store, &prices, toktop::aggregate::Period::AllTime, 0);
-    assert_eq!(summary.total.cost, expected);
+    assert_eq!(summary.total.cost.total(), expected);
 }
 
 #[test]
