@@ -508,7 +508,8 @@ struct ScrollPositions {
     sessions: Option<f64>,
 }
 
-/// Day breakdown and session lists in the order they are built.
+/// Scrolling lists inside a detail card, such as its day breakdown and
+/// session lists.
 fn detail_lists(widget: &gtk::Widget) -> Vec<gtk::ScrolledWindow> {
     fn collect(widget: &gtk::Widget, lists: &mut Vec<gtk::ScrolledWindow>) {
         if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>()
