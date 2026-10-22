@@ -1,6 +1,7 @@
 //! Recursive inotify watcher over source roots and external title indexes.
 //! Missing directories are watched through their nearest existing ancestor.
 
+use crate::model::Tool;
 use inotify::{EventMask, Inotify, WatchDescriptor, WatchMask};
 use std::collections::HashMap;
 use std::fs;
@@ -65,6 +66,8 @@ struct Watcher {
     dirs: HashMap<WatchDescriptor, PathBuf>,
     roots: Vec<PathBuf>,
     files: Vec<PathBuf>,
+    /// Tools whose external title indexes this watcher accepts.
+    tools: Vec<Tool>,
     failure: Option<String>,
     warned: bool,
 }
@@ -73,6 +76,7 @@ struct Watcher {
 pub fn spawn(
     roots: Vec<PathBuf>,
     files: Vec<PathBuf>,
+    tools: Vec<Tool>,
     mut emit: impl FnMut(Change) + Send + 'static,
 ) -> io::Result<Handle> {
     let mut watcher = Watcher {
@@ -80,6 +84,7 @@ pub fn spawn(
         dirs: HashMap::new(),
         roots,
         files,
+        tools,
         failure: None,
         warned: false,
     };
@@ -134,6 +139,9 @@ impl Watcher {
     }
 
     fn add_tree(&mut self, dir: &Path) {
+        if !crate::paths::is_source_path(dir) {
+            return;
+        }
         self.add(dir, TREE_MASK);
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
@@ -292,6 +300,13 @@ impl Watcher {
                 }
                 let Some(name) = event.name else { continue };
                 let path = dir.join(name);
+                let source = crate::store::source_path(&path);
+                if !crate::paths::is_source_path(&path)
+                    && !self.files.contains(&source)
+                    && !crate::paths::is_title_source(&self.tools, &source)
+                {
+                    continue;
+                }
                 if event.mask.contains(EventMask::ISDIR) {
                     // Ancestor watches also see unrelated sibling directories.
                     if !self.in_root(&path)

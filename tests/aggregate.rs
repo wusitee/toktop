@@ -76,9 +76,19 @@ fn cost_applies_cache_and_long_context_rates() {
         cache_write_1h: 100,
         reasoning: 5,
     };
-    let expected = 100.0 * 4e-06 + 15.0 * 2e-05 + 500.0 * 2e-07 + 200.0 * 5e-06 + 100.0 * 8e-06;
-    assert!((price.cost(&tokens, ServiceTier::Standard) - expected).abs() < 1e-12);
-    assert!((price.cost(&tokens, ServiceTier::Priority) - expected * 2.0).abs() < 1e-12);
+    // Cost by kind; reasoning is billed as output, both cache writes as cache write.
+    let cost = price.cost(&tokens, ServiceTier::Standard);
+    let parts = [
+        (cost.input, 100.0 * 4e-06),
+        (cost.cache_read, 500.0 * 2e-07),
+        (cost.cache_write, 200.0 * 5e-06 + 100.0 * 8e-06),
+        (cost.output, 15.0 * 2e-05),
+    ];
+    for (part, expected) in parts {
+        assert!((part - expected).abs() < 1e-12);
+    }
+    let expected: f64 = parts.iter().map(|(_, expected)| expected).sum();
+    assert!((price.cost(&tokens, ServiceTier::Priority).total() - expected * 2.0).abs() < 1e-12);
 
     // Above the threshold, tier rates apply; missing ones fall back to base rates.
     let long = Tokens {
@@ -88,8 +98,8 @@ fn cost_applies_cache_and_long_context_rates() {
         ..Tokens::default()
     };
     let expected = 2000.0 * 8e-06 + 200.0 * 1e-05 + 100.0 * 8e-06;
-    assert!((price.cost(&long, ServiceTier::Standard) - expected).abs() < 1e-12);
-    assert!((price.cost(&long, ServiceTier::Priority) - expected * 2.0).abs() < 1e-12);
+    assert!((price.cost(&long, ServiceTier::Standard).total() - expected).abs() < 1e-12);
+    assert!((price.cost(&long, ServiceTier::Priority).total() - expected * 2.0).abs() < 1e-12);
 }
 
 fn ms(date: NaiveDate, hour: u32) -> i64 {
@@ -126,6 +136,25 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
         parent: None,
         limits: None,
     }
+}
+
+#[test]
+fn summary_counts_free_auto_review_without_unpriced_warning() {
+    let now = ms(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(), 12);
+    let mut store = Store::default();
+    for model in ["codex-auto-review", "unknown-model"] {
+        store.insert_session(
+            format!("/{model}.jsonl").into(),
+            Tool::Codex,
+            session(model, "/work/app", model, vec![(now, 10, None)]),
+        );
+    }
+    let prices = PriceTable::from_litellm(LITELLM.as_bytes()).unwrap();
+    let summary = aggregate::summarize(&store, &prices, Period::Today, now);
+    assert_eq!(summary.unpriced, ["unknown-model"]);
+    assert_eq!(summary.total.cost.total(), 0.0);
+    assert_eq!(summary.total.tokens.input, 20);
+    assert_eq!(summary.total.requests, 2);
 }
 
 #[test]
@@ -180,7 +209,7 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(today_summary.total.tokens.output, 50);
     // The most complete copy's duration goes with its counts.
     assert_eq!(today_summary.total.speed(), Some(12.5));
-    assert!((today_summary.total.cost - 1.0).abs() < 1e-9);
+    assert!((today_summary.total.cost.total() - 1.0).abs() < 1e-9);
     assert!(today_summary.prices_available);
     assert_eq!(today_summary.unpriced, ["gpt-6.1-sol"]);
     let unavailable = aggregate::summarize(&store, &PriceTable::default(), Period::Today, now);
@@ -199,6 +228,52 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(all.total.tokens.input, 130);
     assert_eq!(all.daily.len(), 3);
     assert_eq!(all.daily[0].date, last_month);
+
+    // An open day's breakdown is independent of the main period and uses
+    // the same merged counts, prices and durations as the regular rows.
+    assert!(today_summary.day_detail.is_none());
+    let detailed = aggregate::summarize_with_day(&store, &prices, Period::Today, now, Some(today));
+    let detail = detailed.day_detail.unwrap();
+    assert_eq!(detail.date, today);
+    for (actual, expected) in detail.by_model.iter().zip(&today_summary.by_model) {
+        assert_eq!(actual.key, expected.key);
+        assert_eq!(actual.usage, expected.usage);
+        assert_eq!(actual.split, expected.split);
+        assert!(actual.daily_speed.is_empty());
+    }
+    assert_eq!(detail.by_model.len(), today_summary.by_model.len());
+    assert_eq!(detail.by_project, today_summary.by_project);
+    assert_eq!(detail.sessions, today_summary.sessions);
+    assert_eq!(detailed.total, today_summary.total);
+
+    let historical =
+        aggregate::summarize_with_day(&store, &prices, Period::Today, now, Some(last_month));
+    let detail = historical.day_detail.unwrap();
+    assert_eq!(historical.total, today_summary.total);
+    assert_eq!(detail.by_model.len(), 1);
+    assert_eq!(detail.by_model[0].key, "gpt-6.1-sol");
+    assert_eq!(detail.by_model[0].usage.tokens.input, 7);
+    assert_eq!(detail.by_project[0].key, "/work/app");
+    assert_eq!(detail.by_project[0].usage.requests, 1);
+    assert_eq!(detail.sessions.len(), 1);
+    let session = &detail.sessions[0];
+    assert_eq!(session.id, "c");
+    assert_eq!(session.title, "Indexed title");
+    assert_eq!(session.usage.tokens.input, 7);
+    assert_eq!(session.first_activity, ms(last_month, 9));
+    assert_eq!(session.last_activity, ms(last_month, 9));
+
+    let empty = aggregate::summarize_with_day(
+        &store,
+        &prices,
+        Period::Today,
+        now,
+        Some(today + chrono::Days::new(1)),
+    );
+    let detail = empty.day_detail.unwrap();
+    assert!(detail.by_model.is_empty());
+    assert!(detail.by_project.is_empty());
+    assert!(detail.sessions.is_empty());
 }
 
 #[test]
@@ -259,7 +334,17 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
         ),
     );
 
-    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::Today, now);
+    let summary = aggregate::summarize_with_day(
+        &store,
+        &PriceTable::default(),
+        Period::Today,
+        now,
+        Some(today),
+    );
+    assert_eq!(
+        summary.day_detail.as_ref().unwrap().sessions,
+        summary.sessions
+    );
     assert_eq!(summary.sessions.len(), 1);
     let row = &summary.sessions[0];
     assert_eq!((row.id.as_str(), row.subagents), ("root", 2));
@@ -337,8 +422,14 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
     child.prompt = Some("Child subtask".into());
     store.insert_session("/p.jsonl".into(), Tool::Codex, parent);
     store.insert_session("/c.jsonl".into(), Tool::Codex, child);
-    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::Today, now);
-    let row = &summary.sessions[0];
+    let summary = aggregate::summarize_with_day(
+        &store,
+        &PriceTable::default(),
+        Period::AllTime,
+        now,
+        Some(today),
+    );
+    let row = &summary.day_detail.as_ref().unwrap().sessions[0];
     assert_eq!((row.title.as_str(), row.subagents), ("Parent task", 1));
     assert_eq!(row.project.as_deref(), Some("/work/parent"));
 
@@ -479,8 +570,8 @@ fn cost_uses_priority_rates_and_doubles_missing_tariffs() {
         cache_write_1h: 1,
     };
     assert_eq!(
-        legacy.cost(&tokens, ServiceTier::Priority),
-        legacy.cost(&tokens, ServiceTier::Standard) * 2.0
+        legacy.cost(&tokens, ServiceTier::Priority).total(),
+        legacy.cost(&tokens, ServiceTier::Standard).total() * 2.0
     );
 
     let table = PriceTable::from_litellm(
@@ -514,20 +605,20 @@ fn cost_uses_priority_rates_and_doubles_missing_tariffs() {
         cache_read: 50_000,
         ..Tokens::default()
     };
-    assert!((flat.cost(&long_flat, ServiceTier::Priority) - 1.10775).abs() < 1e-12);
+    assert!((flat.cost(&long_flat, ServiceTier::Priority).total() - 1.10775).abs() < 1e-12);
 
     // Reduced priority tariffs survive disk caching.
     table.save(&cache).unwrap();
     let (table, _) = PriceTable::load(&cache).unwrap();
     let price = *table.lookup("gpt-6.1-sol").unwrap();
-    assert_eq!(price.cost(&tokens, ServiceTier::Standard), 29.0);
-    assert_eq!(price.cost(&tokens, ServiceTier::Priority), 78.0);
+    assert_eq!(price.cost(&tokens, ServiceTier::Standard).total(), 29.0);
+    assert_eq!(price.cost(&tokens, ServiceTier::Priority).total(), 78.0);
     let boundary = Tokens {
         input: 272_000,
         ..Tokens::default()
     };
     assert_eq!(
-        price.cost(&boundary, ServiceTier::Priority),
+        price.cost(&boundary, ServiceTier::Priority).total(),
         272_000.0 * 3.0
     );
     let long = Tokens {
@@ -535,7 +626,7 @@ fn cost_uses_priority_rates_and_doubles_missing_tariffs() {
         ..tokens
     };
     assert_eq!(
-        price.cost(&long, ServiceTier::Priority),
+        price.cost(&long, ServiceTier::Priority).total(),
         272_001.0 * 6.0 + 5.0 * 10.0 + 20.0 * 1.5 + 4.0 * 4.0
     );
     // Missing rates double the corresponding effective standard rate, even
@@ -548,9 +639,9 @@ fn cost_uses_priority_rates_and_doubles_missing_tariffs() {
         cache_read_priority_above_272k: None,
         ..price
     };
-    assert_eq!(partial.cost(&tokens, ServiceTier::Priority), 68.0);
+    assert_eq!(partial.cost(&tokens, ServiceTier::Priority).total(), 68.0);
     assert_eq!(
-        partial.cost(&long, ServiceTier::Priority),
-        partial.cost(&long, ServiceTier::Standard) * 2.0
+        partial.cost(&long, ServiceTier::Priority).total(),
+        partial.cost(&long, ServiceTier::Standard).total() * 2.0
     );
 }

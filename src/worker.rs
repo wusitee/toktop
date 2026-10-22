@@ -6,6 +6,7 @@ use crate::model::Tool;
 use crate::pricing::PriceTable;
 use crate::store::Store;
 use crate::{paths, watch};
+use chrono::NaiveDate;
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
@@ -18,6 +19,8 @@ pub enum Msg {
     /// Watcher generation and whether it covers every directory.
     WatchCoverage(u32, bool),
     Period(Period),
+    /// Retain full model/project breakdowns for this day only while open.
+    DetailDay(Option<NaiveDate>),
     Prices(PriceTable),
     /// Download prices now instead of waiting for the daily refresh.
     RefreshPrices,
@@ -48,6 +51,7 @@ pub fn spawn(
         store: Store::with_tools(tools),
         prices: PriceTable::default(),
         period,
+        detail_day: None,
         last: None,
         emit,
     };
@@ -77,13 +81,20 @@ struct State<E> {
     store: Store,
     prices: PriceTable,
     period: Period,
+    detail_day: Option<NaiveDate>,
     last: Option<Summary>,
     emit: E,
 }
 
 impl<E: FnMut(Summary)> State<E> {
     fn publish(&mut self, tick: bool) {
-        let summary = aggregate::summarize(&self.store, &self.prices, self.period, crate::now_ms());
+        let summary = aggregate::summarize_with_day(
+            &self.store,
+            &self.prices,
+            self.period,
+            crate::now_ms(),
+            self.detail_day,
+        );
         if tick || self.last.as_ref() != Some(&summary) {
             self.last = Some(summary.clone());
             (self.emit)(summary);
@@ -154,6 +165,10 @@ impl<E: FnMut(Summary)> State<E> {
                 Ok(Msg::WatchCoverage(..)) => {}
                 Ok(Msg::Period(period)) => {
                     self.period = period;
+                    self.publish(false);
+                }
+                Ok(Msg::DetailDay(day)) => {
+                    self.detail_day = day;
                     self.publish(false);
                 }
                 Ok(Msg::Prices(table)) => {
@@ -228,13 +243,18 @@ fn start_watch(tools: &[Tool], tx: &Sender<Msg>, generation: u32) -> io::Result<
     roots.sort();
     roots.dedup();
     let tx = tx.clone();
-    let watcher = watch::spawn(roots, paths::title_sources(tools), move |change| {
-        let _ = tx.send(match change {
-            watch::Change::Paths(paths) => Msg::Changed(paths),
-            watch::Change::Rescan => Msg::Rescan,
-            watch::Change::Coverage(complete) => Msg::WatchCoverage(generation, complete),
-        });
-    });
+    let watcher = watch::spawn(
+        roots,
+        paths::title_sources(tools),
+        tools.to_vec(),
+        move |change| {
+            let _ = tx.send(match change {
+                watch::Change::Paths(paths) => Msg::Changed(paths),
+                watch::Change::Rescan => Msg::Rescan,
+                watch::Change::Coverage(complete) => Msg::WatchCoverage(generation, complete),
+            });
+        },
+    );
     if let Err(error) = &watcher {
         eprintln!("toktop: file watching unavailable ({error}); polling every {POLL:?}");
     }
@@ -252,6 +272,7 @@ mod tests {
             store: Store::default(),
             prices: PriceTable::default(),
             period: Period::AllTime,
+            detail_day: None,
             last: None,
             emit: |summary| published.push(summary),
         };

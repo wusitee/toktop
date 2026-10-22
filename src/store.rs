@@ -59,6 +59,9 @@ impl Default for Store {
 
 /// Which tool owns `path`, if it is a source file toktop reads.
 pub fn classify(path: &Path) -> Option<Tool> {
+    if !paths::is_source_path(path) {
+        return None;
+    }
     let name = path.file_name()?.to_str()?;
     for tool in Tool::ALL {
         if !paths::source_roots(tool)
@@ -92,6 +95,9 @@ pub fn source_path(path: &Path) -> PathBuf {
 }
 
 fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !paths::is_source_path(dir) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };

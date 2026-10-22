@@ -43,6 +43,32 @@ pub struct Price {
     pub tier: Option<Tier>,
 }
 
+/// Cost in USD by token kind.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Cost {
+    pub input: f64,
+    pub cache_read: f64,
+    /// 5-minute and 1-hour cache writes.
+    pub cache_write: f64,
+    /// Output and reasoning tokens.
+    pub output: f64,
+}
+
+impl Cost {
+    pub fn total(&self) -> f64 {
+        self.input + self.cache_read + self.cache_write + self.output
+    }
+}
+
+impl std::ops::AddAssign for Cost {
+    fn add_assign(&mut self, other: Cost) {
+        self.input += other.input;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.output += other.output;
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Tier {
     pub threshold: u64,
@@ -56,8 +82,8 @@ pub struct Tier {
 }
 
 impl Price {
-    /// Cost in USD of one request.
-    pub fn cost(&self, tokens: &Tokens, service_tier: ServiceTier) -> f64 {
+    /// Cost of one request.
+    pub fn cost(&self, tokens: &Tokens, service_tier: ServiceTier) -> Cost {
         let prompt = tokens
             .input
             .saturating_add(tokens.cache_read)
@@ -111,11 +137,13 @@ impl Price {
                 (input, output, cache_read, cache_write_5m, cache_write_1h)
             };
         let long_writes = tokens.cache_write_1h.min(tokens.cache_write);
-        tokens.input as f64 * input
-            + tokens.output.saturating_add(tokens.reasoning) as f64 * output
-            + tokens.cache_read as f64 * cache_read
-            + (tokens.cache_write - long_writes) as f64 * cache_write_5m
-            + long_writes as f64 * cache_write_1h
+        Cost {
+            input: tokens.input as f64 * input,
+            cache_read: tokens.cache_read as f64 * cache_read,
+            cache_write: (tokens.cache_write - long_writes) as f64 * cache_write_5m
+                + long_writes as f64 * cache_write_1h,
+            output: tokens.output.saturating_add(tokens.reasoning) as f64 * output,
+        }
     }
 }
 

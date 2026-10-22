@@ -1,7 +1,7 @@
 //! Turns parsed sessions into the totals and breakdowns the UI shows.
 
 use crate::model::{Event, RateLimits, Session, Tokens, Tool};
-use crate::pricing::{Price, PriceTable};
+use crate::pricing::{Cost, Price, PriceTable};
 use crate::store::Store;
 use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
 use std::cmp::Reverse;
@@ -71,7 +71,7 @@ impl Period {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Usage {
     pub tokens: Tokens,
-    pub cost: f64,
+    pub cost: Cost,
     pub requests: u64,
     /// Output and reasoning tokens of requests with a known duration.
     pub timed_tokens: u64,
@@ -80,7 +80,7 @@ pub struct Usage {
 }
 
 impl Usage {
-    fn add(&mut self, tokens: &Tokens, cost: f64, duration_ms: u32) {
+    fn add(&mut self, tokens: &Tokens, cost: Cost, duration_ms: u32) {
         self.tokens += tokens;
         self.cost += cost;
         self.requests += 1;
@@ -181,7 +181,7 @@ struct Acc<'a> {
 }
 
 impl<'a> Acc<'a> {
-    fn add(&mut self, at: &Origin<'a>, tokens: &Tokens, cost: f64, duration_ms: u32) {
+    fn add(&mut self, at: &Origin<'a>, tokens: &Tokens, cost: Cost, duration_ms: u32) {
         self.usage.add(tokens, cost, duration_ms);
         self.split.add(at, tokens.total());
     }
@@ -231,6 +231,15 @@ pub struct DayRow {
     pub split: Split,
 }
 
+/// Full breakdowns retained only for the day whose detail card is open.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayDetail {
+    pub date: NaiveDate,
+    pub by_model: Vec<Row>,
+    pub by_project: Vec<Row>,
+    pub sessions: Vec<SessionRow>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Summary {
     pub period: Period,
@@ -243,6 +252,7 @@ pub struct Summary {
     pub sessions: Vec<SessionRow>,
     /// One entry per local day with usage, across all time, oldest first.
     pub daily: Vec<DayRow>,
+    pub day_detail: Option<DayDetail>,
     /// Tokens per minute over the last five minutes.
     pub rate_per_min: f64,
     /// Output speed over the latest [`RECENT_REQUESTS`] timed requests, any
@@ -287,6 +297,14 @@ fn sorted_rows(map: HashMap<&str, Acc>) -> Vec<Row> {
             .then_with(|| a.label.cmp(&b.label))
     });
     rows
+}
+
+fn label_projects(rows: &mut [Row]) {
+    let paths: Vec<&str> = rows.iter().map(|row| row.key.as_str()).collect();
+    let labels = project_labels(&paths);
+    for (row, label) in rows.iter_mut().zip(labels) {
+        row.label = label;
+    }
 }
 
 /// Folder name of a project path, for display.
@@ -337,6 +355,63 @@ struct Group<'a> {
     project: Option<&'a str>,
 }
 
+impl<'a> Group<'a> {
+    fn metadata(&mut self, session: &'a Session, root_id: &str) {
+        if root_id == session.id {
+            self.title = session.title.as_deref().or(session.prompt.as_deref());
+            self.project = session.project.as_deref();
+        } else {
+            self.subagents += 1;
+            self.fallback_title = self
+                .fallback_title
+                .or(session.title.as_deref())
+                .or(session.prompt.as_deref());
+            self.project = self.project.or(session.project.as_deref());
+        }
+    }
+}
+
+fn session_rows(
+    groups: HashMap<(Tool, &str), Group>,
+    metadata: &HashMap<(Tool, &str), &Session>,
+    titles: &HashMap<String, String>,
+) -> Vec<SessionRow> {
+    let mut rows = Vec::with_capacity(groups.len());
+    for ((tool, id), group) in groups {
+        let root = metadata.get(&(tool, id));
+        let title = titles
+            .get(id)
+            .map(String::as_str)
+            .or(group.title)
+            .or(root.and_then(|root| root.title.as_deref().or(root.prompt.as_deref())))
+            .or(group.fallback_title)
+            .map_or_else(|| id.chars().take(8).collect(), str::to_owned);
+        let project = root
+            .and_then(|root| root.project.as_deref())
+            .or(group.project);
+        rows.push(SessionRow {
+            tool,
+            id: id.to_owned(),
+            title,
+            project: project.map(str::to_owned),
+            first_activity: group.first_activity,
+            last_activity: group.last_activity,
+            usage: group.usage,
+            models: sorted_tokens(group.models)
+                .into_iter()
+                .map(|(model, tokens)| (model.to_owned(), tokens))
+                .collect(),
+            subagents: group.subagents,
+        });
+    }
+    rows.sort_by(|a, b| {
+        b.last_activity
+            .cmp(&a.last_activity)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    rows
+}
+
 /// Consecutive days with usage ending at `today`, or at yesterday when
 /// `today` has none. `daily` is sorted by date.
 pub fn streak(daily: &[DayRow], today: NaiveDate) -> u32 {
@@ -359,11 +434,18 @@ pub fn streak(daily: &[DayRow], today: NaiveDate) -> u32 {
     count
 }
 
-pub fn summarize<'a>(
+pub fn summarize(store: &Store, prices: &PriceTable, period: Period, now_ms: i64) -> Summary {
+    summarize_with_day(store, prices, period, now_ms, None)
+}
+
+/// Includes model and project breakdowns for one local day, independently
+/// of the main period, in the same event pass as the regular summary.
+pub fn summarize_with_day<'a>(
     store: &'a Store,
     prices: &PriceTable,
     period: Period,
     now_ms: i64,
+    detail_day: Option<NaiveDate>,
 ) -> Summary {
     let today = local_date(now_ms);
     let start = period.start(today);
@@ -385,6 +467,8 @@ pub fn summarize<'a>(
     let mut by_model: HashMap<&str, Acc> = HashMap::new();
     let mut by_project: HashMap<&str, Acc> = HashMap::new();
     let mut daily: HashMap<NaiveDate, Acc> = HashMap::new();
+    let mut day_models: HashMap<&str, Acc> = HashMap::new();
+    let mut day_projects: HashMap<&str, Acc> = HashMap::new();
     let speed_start = today - Days::new(SPEED_DAYS - 1);
     let mut model_days: HashMap<(&str, NaiveDate), Usage> = HashMap::new();
     let mut unpriced: HashSet<String> = HashSet::new();
@@ -444,6 +528,7 @@ pub fn summarize<'a>(
         id
     };
     let mut groups: HashMap<(Tool, &str), Group> = HashMap::new();
+    let mut day_groups: HashMap<(Tool, &str), Group> = HashMap::new();
 
     for (_, entry) in files {
         let session = &entry.session;
@@ -456,6 +541,7 @@ pub fn summarize<'a>(
         let mut model_tokens: HashMap<&str, u64> = HashMap::new();
         let mut first_activity = i64::MAX;
         let mut last_activity = i64::MIN;
+        let mut day_used = false;
         for event in &session.events {
             let (tokens, merged_duration) = match event.key.as_deref() {
                 // `remove` makes later copies miss and be skipped.
@@ -477,7 +563,7 @@ pub fn summarize<'a>(
             let price = *price_cache
                 .entry(model)
                 .or_insert_with(|| prices.lookup(model).copied());
-            let cost = price.map_or(0.0, |price| price.cost(&tokens, event.tier));
+            let cost = price.map_or_else(Cost::default, |price| price.cost(&tokens, event.tier));
 
             let duration = merged_duration.unwrap_or(event.duration_ms);
             let at = Origin {
@@ -491,6 +577,29 @@ pub fn summarize<'a>(
                 .entry(date)
                 .or_default()
                 .add(&at, &tokens, cost, duration);
+            if detail_day == Some(date) {
+                day_used = true;
+                let group = day_groups
+                    .entry((entry.tool, root_id))
+                    .or_insert_with(|| Group {
+                        first_activity: i64::MAX,
+                        ..Group::default()
+                    });
+                group.usage.add(&tokens, cost, duration);
+                group.first_activity = group.first_activity.min(event.ts);
+                group.last_activity = group.last_activity.max(event.ts);
+                add_tokens(&mut group.models, model, tokens.total());
+                day_models
+                    .entry(model)
+                    .or_default()
+                    .add(&at, &tokens, cost, duration);
+                if let Some(project) = project {
+                    day_projects
+                        .entry(project)
+                        .or_default()
+                        .add(&at, &tokens, cost, duration);
+                }
+            }
             if duration > 0 && date >= speed_start && date <= today {
                 model_days
                     .entry((model, date))
@@ -510,7 +619,8 @@ pub fn summarize<'a>(
             if event.ts < start_ms {
                 continue;
             }
-            if price.is_none() && !prices.is_empty() {
+            // Auto-review is free, so a missing catalog price is expected.
+            if price.is_none() && !prices.is_empty() && model != "codex-auto-review" {
                 unpriced.insert(model.to_owned());
             }
             summary.total.add(&tokens, cost, duration);
@@ -543,6 +653,12 @@ pub fn summarize<'a>(
             summary.codex_limits = Some(limits.clone());
         }
 
+        if day_used {
+            day_groups
+                .get_mut(&(entry.tool, root_id))
+                .unwrap()
+                .metadata(session, root_id);
+        }
         if session_usage.requests > 0 {
             let group = groups
                 .entry((entry.tool, root_id))
@@ -556,48 +672,11 @@ pub fn summarize<'a>(
             for (model, tokens) in model_tokens {
                 add_tokens(&mut group.models, model, tokens);
             }
-            if root_id == session.id {
-                group.title = session.title.as_deref().or(session.prompt.as_deref());
-                group.project = session.project.as_deref();
-            } else {
-                group.subagents += 1;
-                group.fallback_title = group
-                    .fallback_title
-                    .or(session.title.as_deref())
-                    .or(session.prompt.as_deref());
-                group.project = group.project.or(session.project.as_deref());
-            }
+            group.metadata(session, root_id);
         }
     }
 
-    for ((tool, id), group) in groups {
-        let root = metadata.get(&(tool, id));
-        let title = store
-            .titles
-            .get(id)
-            .map(String::as_str)
-            .or(group.title)
-            .or(root.and_then(|root| root.title.as_deref().or(root.prompt.as_deref())))
-            .or(group.fallback_title)
-            .map_or_else(|| id.chars().take(8).collect(), str::to_owned);
-        let project = root
-            .and_then(|root| root.project.as_deref())
-            .or(group.project);
-        summary.sessions.push(SessionRow {
-            tool,
-            id: id.to_owned(),
-            title,
-            project: project.map(str::to_owned),
-            first_activity: group.first_activity,
-            last_activity: group.last_activity,
-            usage: group.usage,
-            models: sorted_tokens(group.models)
-                .into_iter()
-                .map(|(model, tokens)| (model.to_owned(), tokens))
-                .collect(),
-            subagents: group.subagents,
-        });
-    }
+    summary.sessions = session_rows(groups, &metadata, &store.titles);
 
     let mut tools: Vec<ToolRow> = by_tool
         .into_iter()
@@ -629,20 +708,7 @@ pub fn summarize<'a>(
         }
     }
     summary.by_project = sorted_rows(by_project);
-    let paths: Vec<&str> = summary
-        .by_project
-        .iter()
-        .map(|row| row.key.as_str())
-        .collect();
-    let labels = project_labels(&paths);
-    for (row, label) in summary.by_project.iter_mut().zip(labels) {
-        row.label = label;
-    }
-    summary.sessions.sort_by(|a, b| {
-        b.last_activity
-            .cmp(&a.last_activity)
-            .then_with(|| a.id.cmp(&b.id))
-    });
+    label_projects(&mut summary.by_project);
     let mut days: Vec<DayRow> = daily
         .into_iter()
         .map(|(date, acc)| DayRow {
@@ -654,6 +720,16 @@ pub fn summarize<'a>(
     days.sort_by_key(|day| day.date);
     summary.streak_days = streak(&days, today);
     summary.daily = days;
+    summary.day_detail = detail_day.map(|date| {
+        let mut by_project = sorted_rows(day_projects);
+        label_projects(&mut by_project);
+        DayDetail {
+            date,
+            by_model: sorted_rows(day_models),
+            by_project,
+            sessions: session_rows(day_groups, &metadata, &store.titles),
+        }
+    });
     summary.rate_per_min = recent_tokens as f64 / (RATE_WINDOW_MS as f64 / 60_000.0);
     let recent = recent_timed.into_iter().fold(
         Usage::default(),

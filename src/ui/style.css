@@ -15,6 +15,10 @@
 @define-color toktop_pi #c792ea;
 @define-color toktop_kimi #22b8cf;
 @define-color toktop_other #8b949e;
+@define-color toktop_input alpha(@toktop_fg, 0.64);
+@define-color toktop_cache_read alpha(@toktop_fg, 0.38);
+@define-color toktop_cache_write alpha(@toktop_fg, 0.88);
+@define-color toktop_output @toktop_accent;
 
 window.toktop {
   background: none;
@@ -127,7 +131,7 @@ window.toktop.windowed .card {
 .hero {
   font-family: sans-serif;
   font-size: 40px;
-  font-weight: 300;
+  font-weight: 600;
   font-feature-settings: "tnum";
   margin: 2px 0;
 }
@@ -140,6 +144,24 @@ window.toktop.windowed .card {
 .tiles {
   margin: 12px 0 4px;
 }
+
+/* Tokens or cost by token kind: the bar draws each segment in its swatch's
+   color. */
+.card > .kind-split {
+  margin-top: 12px;
+}
+
+.kind-swatch {
+  min-width: 8px;
+  min-height: 8px;
+  border-radius: 2px;
+  background-color: currentColor;
+}
+
+.kind-swatch.input { color: @toktop_input; }
+.kind-swatch.cache-read { color: @toktop_cache_read; }
+.kind-swatch.cache-write { color: @toktop_cache_write; }
+.kind-swatch.output { color: @toktop_output; }
 
 .tile {
   background-color: alpha(black, 0.18);
@@ -198,7 +220,21 @@ progressbar.low progress {
   background-color: @toktop_warn;
 }
 
-/* Scrolling breakdown and expanded sessions lists. */
+/* Scrolling breakdown and expanded sessions lists. The scrollbar (6px gap
+   and 4px bar) sits in the card's right padding, 4px from its edge; the list
+   keeps the card's content width whether or not the scrollbar is shown. */
+.card > .section > .list-scroll {
+  margin-right: -14px;
+}
+
+.card > .section > .list-scroll > viewport {
+  margin-right: 14px;
+}
+
+.card > .section > .list-scroll.scrolling > viewport {
+  margin-right: 4px;
+}
+
 .list-scroll > scrollbar.vertical {
   background: none;
   border: none;
@@ -207,6 +243,7 @@ progressbar.low progress {
 
 .list-scroll > scrollbar.vertical > range > trough {
   min-width: 4px;
+  margin: 0;
   background: none;
 }
 
@@ -254,12 +291,23 @@ popover.detail > contents {
   color: @toktop_fg;
   border: 1px solid @toktop_line;
   border-radius: 16px;
-  padding: 14px 18px 12px;
+  padding: 14px 4px 12px 18px;
   box-shadow: none;
   /* The gap to the main card, on whichever side the card opens. */
   margin: 0 10px;
   font-family: monospace;
   font-size: 12px;
+}
+
+/* The detail scrollbar always keeps its column (6px gap and 4px bar), so
+   the header is inset by that column and the body's gap: both end 18px
+   from the edge, like the left padding. */
+.detail-header {
+  margin-right: 14px;
+}
+
+.detail-body {
+  margin-right: 4px;
 }
 
 .detail-kind {
@@ -286,4 +334,11 @@ popover.detail > contents {
 
 .detail-note {
   margin-top: 4px;
+}
+
+button.detail-link {
+  min-height: 0;
+  padding: 0;
+  color: inherit;
+  font-weight: normal;
 }

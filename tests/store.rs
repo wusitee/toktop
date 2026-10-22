@@ -3,6 +3,17 @@
 use toktop::model::Tool;
 use toktop::store::Store;
 
+fn generation(id: u8, model: &str) -> Vec<u8> {
+    let usage = [0x10, 0x05, 0x5a, 0x01, b'a' + id];
+    let mut chat = vec![0x22, usage.len() as u8];
+    chat.extend_from_slice(&usage);
+    chat.extend_from_slice(&[0x9a, 0x01, model.len() as u8]);
+    chat.extend_from_slice(model.as_bytes());
+    let mut root = vec![0x0a, chat.len() as u8];
+    root.extend_from_slice(&chat);
+    root
+}
+
 #[test]
 fn wal_commits_refresh_antigravity_sessions() {
     let dir = tempfile::tempdir().unwrap();
@@ -13,29 +24,167 @@ fn wal_commits_refresh_antigravity_sessions() {
     )
     .unwrap();
     // chatModel { usage { #2: input } , #19: model }, with a distinct responseId per row.
-    let generation = |id: u8| -> Vec<u8> {
-        let usage = [0x10, 0x05, 0x5a, 0x01, b'a' + id];
-        let mut chat = vec![0x22, usage.len() as u8];
-        chat.extend_from_slice(&usage);
-        chat.extend_from_slice(&[0x9a, 0x01, 0x01, b'm']);
-        let mut root = vec![0x0a, chat.len() as u8];
-        root.extend_from_slice(&chat);
-        root
-    };
-    conn.execute("INSERT INTO gen_metadata VALUES (0, ?1)", [generation(0)])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO gen_metadata VALUES (0, ?1)",
+        [generation(0, "m")],
+    )
+    .unwrap();
 
     let mut store = Store::default();
     store.track(path.clone(), Tool::Antigravity).unwrap();
     assert_eq!(store.files[&path].session.events.len(), 1);
 
     // The commit lands in conv.db-wal; conv.db itself is unchanged.
-    conn.execute("INSERT INTO gen_metadata VALUES (1, ?1)", [generation(1)])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO gen_metadata VALUES (1, ?1)",
+        [generation(1, "m")],
+    )
+    .unwrap();
     let mut wal = path.as_os_str().to_owned();
     wal.push("-wal");
     assert!(store.update([wal.into()]));
     assert_eq!(store.files[&path].session.events.len(), 2);
+}
+
+#[test]
+fn t3_antigravity_sources_include_conversations_and_skip_artifacts() {
+    const CHILD: &str = "TOKTOP_T3_SOURCE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "t3_antigravity_sources_include_conversations_and_skip_artifacts",
+            ])
+            .env(CHILD, "1")
+            .env("HOME", dir.path())
+            .status()
+            .unwrap();
+        assert!(status.success());
+        return;
+    }
+    let root = toktop::paths::source_roots(Tool::Antigravity)
+        .pop()
+        .unwrap();
+    let home = root.join("provider-a/antigravity-acp");
+    let conversations = home.join("conversations");
+    std::fs::create_dir_all(&conversations).unwrap();
+    let path = conversations.join("conversation.db");
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob)")
+        .unwrap();
+    conn.execute(
+        "INSERT INTO gen_metadata VALUES (0, ?1)",
+        [generation(0, "gemini-3.8-flash-n")],
+    )
+    .unwrap();
+    let titles = home.join("conversation_summaries.db");
+    rusqlite::Connection::open(&titles)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id text, title text);
+         INSERT INTO conversation_summaries VALUES ('conversation', 'Gemini task');",
+        )
+        .unwrap();
+    let artifact = home.join("brain/artifacts/unrelated.db");
+    std::fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    std::fs::write(&artifact, "not a conversation").unwrap();
+    assert_eq!(toktop::store::classify(&path), Some(Tool::Antigravity));
+    assert_eq!(toktop::store::classify(&artifact), None);
+    assert_eq!(toktop::store::classify(&titles), None);
+
+    let mut store = Store::with_tools(vec![Tool::Antigravity]);
+    assert!(store.sync_all());
+    assert_eq!(store.files.keys().collect::<Vec<_>>(), [&path]);
+    assert_eq!(store.files[&path].session.models, ["gemini-3.8-flash-n"]);
+    assert_eq!(store.files[&path].session.events[0].tokens.input, 5);
+    assert_eq!(store.titles["conversation"], "Gemini task");
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watcher = toktop::watch::spawn(
+        vec![root.clone()],
+        vec![titles.clone()],
+        vec![Tool::Antigravity],
+        move |change| {
+            let _ = tx.send(change);
+        },
+    )
+    .unwrap();
+    assert!(matches!(
+        rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
+        toktop::watch::Change::Coverage(true)
+    ));
+    std::fs::write(&artifact, "changed artifact").unwrap();
+    assert!(matches!(
+        rx.recv_timeout(std::time::Duration::from_millis(100)),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+    ));
+
+    // Title files outside conversations still receive change notifications.
+    rusqlite::Connection::open(&titles)
+        .unwrap()
+        .execute(
+            "UPDATE conversation_summaries SET title = 'Renamed Gemini task'",
+            [],
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let change = rx
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        if let toktop::watch::Change::Paths(paths) = change {
+            store.update(paths);
+            if store.titles["conversation"] == "Renamed Gemini task" {
+                break;
+            }
+        }
+    }
+
+    // A new provider is discovered without restarting or watching its artifacts.
+    let next = root.join("provider-b/antigravity-acp/conversations");
+    std::fs::create_dir_all(&next).unwrap();
+    std::fs::copy(&path, next.join("second.db")).unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let change = rx
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        if matches!(change, toktop::watch::Change::Rescan) {
+            break;
+        }
+    }
+    assert!(store.sync_all());
+    assert_eq!(store.files.len(), 2);
+    assert_eq!(toktop::paths::antigravity_homes().len(), 4);
+
+    // A title file that appears after startup is still reported for a newly
+    // discovered provider; the watcher's title list is not fixed then.
+    watcher.reconcile();
+    let next_titles = root.join("provider-b/antigravity-acp/conversation_summaries.db");
+    rusqlite::Connection::open(&next_titles)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id text, title text);
+             INSERT INTO conversation_summaries VALUES ('second', 'Second Gemini task');",
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let change = rx
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        if let toktop::watch::Change::Paths(paths) = change {
+            store.update(paths);
+            if store
+                .titles
+                .get("second")
+                .is_some_and(|title| title == "Second Gemini task")
+            {
+                break;
+            }
+        }
+    }
 }
 
 #[test]

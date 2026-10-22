@@ -1,14 +1,17 @@
-//! Cairo charts: a weekly activity heatmap, a daily trend line and a daily
-//! speed line.
+//! Cairo charts: a weekly activity heatmap, a daily trend line, a daily
+//! speed line and a bar of tokens or cost by token kind.
 //!
-//! Both draw in their widget's CSS `color`, so a user stylesheet can
-//! restyle them like any other text.
+//! They draw in CSS `color`s, so a user stylesheet can restyle them like any
+//! other text.
 
+use super::widget::{ellipsized, hbox, label};
 use chrono::{Datelike, Days, NaiveDate};
 use gtk::prelude::*;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use toktop::format;
+use toktop::model::Tokens;
+use toktop::pricing::Cost;
 
 #[derive(Clone, PartialEq)]
 pub struct Day {
@@ -428,4 +431,181 @@ fn rounded_rect(cr: &gtk::cairo::Context, x: f64, y: f64, w: f64, h: f64, r: f64
     cr.arc(x + r, y + h - r, r, FRAC_PI_2, PI);
     cr.arc(x + r, y + r, r, PI, 1.5 * PI);
     cr.close_path();
+}
+
+/// Token kinds that tokens and costs divide into, in bar order: style class
+/// and name.
+const KINDS: [(&str, &str); 4] = [
+    ("input", "Input"),
+    ("cache-read", "Cache read"),
+    ("cache-write", "Cache write"),
+    ("output", "Output"),
+];
+
+/// Tokens in [`KINDS`] order; reasoning counts as output, as it is billed.
+pub fn token_parts(tokens: &Tokens) -> [f64; 4] {
+    [
+        tokens.input as f64,
+        tokens.cache_read as f64,
+        tokens.cache_write as f64,
+        tokens.output.saturating_add(tokens.reasoning) as f64,
+    ]
+}
+
+/// Cost in [`KINDS`] order.
+pub fn cost_parts(cost: &Cost) -> [f64; 4] {
+    [cost.input, cost.cache_read, cost.cache_write, cost.output]
+}
+
+pub fn token_amount(tokens: f64) -> String {
+    format::tokens(tokens as u64)
+}
+
+const SEGMENT_GAP: f64 = 2.0;
+/// Narrowest visible part of a segmented bar.
+const SEGMENT_MIN: f64 = 2.0;
+
+/// Tokens or cost by token kind: a segmented bar over a two-column legend.
+/// Each segment draws in the CSS `color` of its legend swatch.
+pub struct KindSplit {
+    pub root: gtk::Box,
+    bar: gtk::DrawingArea,
+    parts: Rc<Cell<[f64; 4]>>,
+    items: [gtk::Box; 4],
+    amounts: [gtk::Label; 4],
+    amount: fn(f64) -> String,
+}
+
+impl KindSplit {
+    /// `amount` formats a part for the legend and tooltips.
+    pub fn new(amount: fn(f64) -> String) -> Self {
+        let legend = gtk::Grid::builder()
+            .column_spacing(18)
+            .row_spacing(2)
+            .column_homogeneous(true)
+            .build();
+        let kinds: [(gtk::Box, gtk::Box, gtk::Label); 4] = std::array::from_fn(|index| {
+            let (class, name) = KINDS[index];
+            let swatch = gtk::Box::builder()
+                .css_classes(["kind-swatch", class])
+                .valign(gtk::Align::Center)
+                .build();
+            let text = ellipsized(&["dim"]);
+            text.set_label(name);
+            let amount = label(&["numeric"]);
+            let item = hbox(6);
+            item.append(&swatch);
+            item.append(&text);
+            item.append(&amount);
+            legend.attach(&item, index as i32 % 2, index as i32 / 2, 1, 1);
+            (swatch, item, amount)
+        });
+        let swatches = kinds.clone().map(|(swatch, ..)| swatch);
+        let items = kinds.clone().map(|(_, item, _)| item);
+        let amounts = kinds.map(|(.., amount)| amount);
+        let bar = gtk::DrawingArea::builder()
+            .content_height(6)
+            .hexpand(true)
+            .has_tooltip(true)
+            .build();
+        let parts: Rc<Cell<[f64; 4]>> = Rc::default();
+        let data = parts.clone();
+        bar.set_draw_func(move |_, cr, width, height| {
+            let parts = data.get();
+            for (index, x, w) in segments(&parts, width as f64) {
+                set_source(cr, &swatches[index].color(), 1.0);
+                rounded_rect(cr, x, 0.0, w, height as f64, 2.0);
+                let _ = cr.fill();
+            }
+        });
+        let data = parts.clone();
+        bar.connect_query_tooltip(move |bar, x, _y, _keyboard, tooltip| {
+            let parts = data.get();
+            let total: f64 = parts.iter().sum();
+            let x = x as f64;
+            let Some((index, ..)) = segments(&parts, bar.width() as f64)
+                .find(|(_, start, w)| x < start + w + SEGMENT_GAP)
+            else {
+                return false;
+            };
+            tooltip.set_text(Some(&format!(
+                "{} · {} · {}",
+                KINDS[index].1,
+                amount(parts[index]),
+                format::percent(parts[index] / total)
+            )));
+            true
+        });
+        let root = gtk::Box::builder()
+            .orientation(gtk::Orientation::Vertical)
+            .spacing(8)
+            .css_classes(["kind-split"])
+            .build();
+        root.append(&bar);
+        root.append(&legend);
+        KindSplit {
+            root,
+            bar,
+            parts,
+            items,
+            amounts,
+            amount,
+        }
+    }
+
+    pub fn set(&self, parts: [f64; 4]) {
+        if self.parts.get() != parts {
+            self.parts.set(parts);
+            self.bar.queue_draw();
+        }
+        let total: f64 = parts.iter().sum();
+        for (index, part) in parts.into_iter().enumerate() {
+            self.amounts[index].set_label(&(self.amount)(part));
+            self.items[index].set_tooltip_text(Some(&format::percent(if total > 0.0 {
+                part / total
+            } else {
+                0.0
+            })));
+        }
+    }
+}
+
+/// Index, x and width of each nonzero part's segment. Every segment gets a
+/// minimum width first; the remaining space is shared by value, so narrow
+/// slivers cannot push a larger segment outside the bar. The last absorbs
+/// rounding.
+pub(super) fn segments(parts: &[f64; 4], width: f64) -> impl Iterator<Item = (usize, f64, f64)> {
+    let total: f64 = parts.iter().sum();
+    let shown = parts.iter().filter(|part| **part > 0.0).count();
+    // A very narrow bar keeps its gaps inside the available width.
+    let gap = if shown <= 1 {
+        0.0
+    } else {
+        SEGMENT_GAP.min(width / (shown - 1) as f64)
+    };
+    let gaps = gap * shown.saturating_sub(1) as f64;
+    let available = (width - gaps).max(0.0);
+    let min = if shown == 0 {
+        0.0
+    } else {
+        SEGMENT_MIN.min(available / shown as f64)
+    };
+    let room = (available - min * shown as f64).max(0.0);
+    let mut x = 0.0;
+    let mut left = shown;
+    parts
+        .iter()
+        .enumerate()
+        .filter(|(_, part)| **part > 0.0)
+        .map(move |(index, part)| {
+            left -= 1;
+            let w = if left == 0 {
+                (width - x).max(0.0)
+            } else {
+                min + part / total * room
+            };
+            let segment = (index, x, w);
+            x += w + gap;
+            segment
+        })
 }

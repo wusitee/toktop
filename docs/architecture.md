@@ -30,6 +30,8 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 2. **Parse.** Each source file becomes one `Session`: events (timestamp, model, tokens, optional dedup key), project, title and Codex rate limits.
 3. **Aggregate.** `summarize` filters events by period, merges copies of one response across files, prices each event and builds the breakdowns ([accounting.md](accounting.md), [pricing.md](pricing.md)).
 
+Opening a day detail card requests full model, project and grouped session breakdowns for that local date, independently of the main period. The worker builds them from cached events in the existing aggregation pass and includes them in `Summary.day_detail`. The card groups models, projects and tools behind the same tabs as the main card, and scrolls that breakdown and the sessions list independently through up to 100 entries. Day drill-downs share those data and open in one reusable secondary popover, leaving the day overview visible. The secondary panel closes independently; closing or switching the day also closes it. Only one day's breakdowns are retained, and closing the card, switching to a period detail or hiding the widget releases them. Navigation adds no threads, timers, file reads or network requests.
+
 ## Modules
 
 | Module | Role |
@@ -81,4 +83,4 @@ Projects group by full path with trailing `/` characters removed. `Row.key` reta
 
 ## Tests
 
-Maintained tests live in `tests/`: `parse.rs` (per-tool parser contracts), `aggregate.rs` (pricing and aggregation), `store.rs` (change detection and title reloads) and `watch.rs` (directory lifetime and watch coverage). Fixtures are built inline; tests never read real logs.
+Maintained tests live in `tests/`: `parse.rs` (per-tool parser contracts), `aggregate.rs` (pricing and aggregation), `store.rs` (change detection and title reloads), `watch.rs` (directory lifetime and watch coverage) and `ui/detail.rs` (date-scoped detail selection, included by the UI module). Fixtures are built inline; tests never read real logs.
