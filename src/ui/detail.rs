@@ -277,13 +277,51 @@ impl Detail {
         let selected = self.selected.borrow().clone();
         if let Some(selection) = selected {
             self.latest.replace(Some(summary.clone()));
+            // A refresh keeps the reader's place; a new selection or tab
+            // starts its own scroll positions.
+            let positions = self.scroll_positions();
             if !self.render(&selection, summary) {
                 self.popover.popdown();
+            } else {
+                self.restore_scroll_positions(positions);
             }
             let secondary = self.secondary.borrow().clone();
             if let Some(secondary) = secondary {
                 secondary.refresh(summary);
             }
+        }
+    }
+
+    /// Scroll values to keep across a refresh: the card body, the selected
+    /// breakdown and the session list.
+    fn scroll_positions(&self) -> ScrollPositions {
+        let lists = detail_lists(self.content.upcast_ref());
+        let value = |class: &str| {
+            lists
+                .iter()
+                .find(|scroll| scroll.has_css_class(class))
+                .map(|scroll| scroll.vadjustment().value())
+        };
+        ScrollPositions {
+            outer: self.scroll.vadjustment().value(),
+            breakdown: value("detail-breakdown"),
+            sessions: value("detail-sessions"),
+        }
+    }
+
+    fn restore_scroll_positions(&self, positions: ScrollPositions) {
+        restore_scroll(&self.scroll, positions.outer);
+        self.restore_list_scroll("detail-breakdown", positions.breakdown);
+        self.restore_list_scroll("detail-sessions", positions.sessions);
+    }
+
+    fn restore_list_scroll(&self, class: &str, value: Option<f64>) {
+        let Some(value) = value else { return };
+        if let Some(scroll) = detail_lists(self.content.upcast_ref())
+            .iter()
+            .find(|scroll| scroll.has_css_class(class))
+        {
+            restore_scroll(scroll, value);
         }
     }
 
@@ -384,7 +422,13 @@ impl Detail {
         let selected = self.selected.borrow().clone();
         let latest = self.latest.borrow().clone();
         if let (Some(selection @ Selection::Day(_)), Some(summary)) = (selected, latest) {
-            self.render(&selection, &summary);
+            let positions = self.scroll_positions();
+            if self.render(&selection, &summary) {
+                // The breakdown list belongs to the new tab, but the day
+                // overview and its sessions list should stay in place.
+                restore_scroll(&self.scroll, positions.outer);
+                self.restore_list_scroll("detail-sessions", positions.sessions);
+            }
         }
     }
 }
@@ -454,6 +498,65 @@ fn item_list(
         scroll.set_max_content_height((height.max(1) * rows as i32).max(1));
     }
     scroll
+}
+
+/// Scroll offsets captured before rebuilding a detail card.
+#[derive(Default)]
+struct ScrollPositions {
+    outer: f64,
+    breakdown: Option<f64>,
+    sessions: Option<f64>,
+}
+
+/// Day breakdown and session lists in the order they are built.
+fn detail_lists(widget: &gtk::Widget) -> Vec<gtk::ScrolledWindow> {
+    fn collect(widget: &gtk::Widget, lists: &mut Vec<gtk::ScrolledWindow>) {
+        if let Ok(scroll) = widget.clone().downcast::<gtk::ScrolledWindow>()
+            && scroll.has_css_class("detail-list")
+        {
+            lists.push(scroll);
+        }
+        let mut child = widget.first_child();
+        while let Some(current) = child {
+            collect(&current, lists);
+            child = current.next_sibling();
+        }
+    }
+    let mut lists = Vec::new();
+    collect(widget, &mut lists);
+    lists
+}
+
+/// Restores `value` once the rebuilt list has a layout. Setting it earlier
+/// would be clamped to zero because the adjustment has no extent yet.
+fn restore_scroll(scroll: &gtk::ScrolledWindow, value: f64) {
+    if value <= 0.0 {
+        return;
+    }
+    let adjustment = scroll.vadjustment();
+    let max = (adjustment.upper() - adjustment.page_size()).max(0.0);
+    if max > 0.0 {
+        adjustment.set_value(value.min(max));
+        return;
+    }
+    let done = Rc::new(Cell::new(false));
+    let handler = Rc::new(Cell::new(None::<gtk::glib::SignalHandlerId>));
+    let slot = handler.clone();
+    let listener = adjustment.connect_changed(move |adjustment| {
+        if done.get() {
+            return;
+        }
+        let max = (adjustment.upper() - adjustment.page_size()).max(0.0);
+        if max <= 0.0 {
+            return;
+        }
+        done.set(true);
+        adjustment.set_value(value.min(max));
+        if let Some(id) = slot.take() {
+            adjustment.disconnect(id);
+        }
+    });
+    handler.set(Some(listener));
 }
 
 struct Item {
@@ -961,7 +1064,9 @@ impl Info {
                 empty.set_label("No usage");
                 breakdown.append(&empty);
             } else {
-                breakdown.append(&item_list(items, DAY_ROWS, &row));
+                let list = item_list(items, DAY_ROWS, &row);
+                list.add_css_class("detail-breakdown");
+                breakdown.append(&list);
             }
             card.append(&breakdown);
 
@@ -974,7 +1079,9 @@ impl Info {
                     count => format!("{count} sessions"),
                 });
                 sessions.append(&section_header(&section("SESSIONS"), &count));
-                sessions.append(&item_list(&self.sessions, DAY_ROWS, &row));
+                let list = item_list(&self.sessions, DAY_ROWS, &row);
+                list.add_css_class("detail-sessions");
+                sessions.append(&list);
                 card.append(&sessions);
             }
         } else {

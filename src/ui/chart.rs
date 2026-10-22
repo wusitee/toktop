@@ -462,6 +462,8 @@ pub fn token_amount(tokens: f64) -> String {
 }
 
 const SEGMENT_GAP: f64 = 2.0;
+/// Narrowest visible part of a segmented bar.
+const SEGMENT_MIN: f64 = 2.0;
 
 /// Tokens or cost by token kind: a segmented bar over a two-column legend.
 /// Each segment draws in the CSS `color` of its legend swatch.
@@ -568,12 +570,27 @@ impl KindSplit {
     }
 }
 
-/// Index, x and width of each nonzero part's segment. Every segment is at
-/// least 2 px wide, so a sliver stays visible; the last absorbs rounding.
-fn segments(parts: &[f64; 4], width: f64) -> impl Iterator<Item = (usize, f64, f64)> {
+/// Index, x and width of each nonzero part's segment. Every segment gets a
+/// minimum width first; the remaining space is shared by value, so narrow
+/// slivers cannot push a larger segment outside the bar. The last absorbs
+/// rounding.
+pub(super) fn segments(parts: &[f64; 4], width: f64) -> impl Iterator<Item = (usize, f64, f64)> {
     let total: f64 = parts.iter().sum();
     let shown = parts.iter().filter(|part| **part > 0.0).count();
-    let room = (width - SEGMENT_GAP * shown.saturating_sub(1) as f64).max(0.0);
+    // A very narrow bar keeps its gaps inside the available width.
+    let gap = if shown <= 1 {
+        0.0
+    } else {
+        SEGMENT_GAP.min(width / (shown - 1) as f64)
+    };
+    let gaps = gap * shown.saturating_sub(1) as f64;
+    let available = (width - gaps).max(0.0);
+    let min = if shown == 0 {
+        0.0
+    } else {
+        SEGMENT_MIN.min(available / shown as f64)
+    };
+    let room = (available - min * shown as f64).max(0.0);
     let mut x = 0.0;
     let mut left = shown;
     parts
@@ -583,12 +600,12 @@ fn segments(parts: &[f64; 4], width: f64) -> impl Iterator<Item = (usize, f64, f
         .map(move |(index, part)| {
             left -= 1;
             let w = if left == 0 {
-                (width - x).max(2.0)
+                (width - x).max(0.0)
             } else {
-                (part / total * room).max(2.0)
+                min + part / total * room
             };
             let segment = (index, x, w);
-            x += w + SEGMENT_GAP;
+            x += w + gap;
             segment
         })
 }

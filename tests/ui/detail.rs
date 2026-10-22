@@ -5,6 +5,21 @@ use toktop::aggregate::{DayDetail, Row, SessionRow};
 use toktop::model::Tokens;
 
 #[test]
+fn segmented_bar_stays_inside_its_width() {
+    let parts = [0.01, 0.01, 20.0, 0.01];
+    for width in [300.0, 5.0] {
+        let end = chart::segments(&parts, width)
+            .map(|(_, x, part)| x + part)
+            .fold(0.0, f64::max);
+        assert!(
+            end <= width + 1e-9,
+            "segments of a {width}px bar end at {end}"
+        );
+    }
+    assert_eq!(chart::segments(&[0.0; 4], 300.0).count(), 0);
+}
+
+#[test]
 fn day_drilldowns_keep_the_date_usage_and_share() {
     let date = NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
     let usage = |input| Usage {

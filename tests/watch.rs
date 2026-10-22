@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
+use toktop::model::Tool;
 use toktop::watch::{self, Change};
 
 fn receive(rx: &Receiver<Change>, matches: impl Fn(&Change) -> bool) {
@@ -66,9 +67,14 @@ fn late_root_moved_aside_and_recreated_keeps_watching() {
     let root = dir.path().join("parent/sessions");
     fs::create_dir(root.parent().unwrap()).unwrap();
     let (tx, rx) = mpsc::channel();
-    let _watcher = watch::spawn(vec![root.clone()], vec![], move |change| {
-        let _ = tx.send(change);
-    })
+    let _watcher = watch::spawn(
+        vec![root.clone()],
+        vec![],
+        Tool::ALL.to_vec(),
+        move |change| {
+            let _ = tx.send(change);
+        },
+    )
     .unwrap();
     coverage(&rx);
 
@@ -98,9 +104,14 @@ fn moved_subtree_reports_its_new_path_and_leaving_root_drops_watches() {
     let root = dir.path().join("sessions");
     fs::create_dir_all(root.join("old/nested")).unwrap();
     let (tx, rx) = mpsc::channel();
-    let _watcher = watch::spawn(vec![root.clone()], vec![], move |change| {
-        let _ = tx.send(change);
-    })
+    let _watcher = watch::spawn(
+        vec![root.clone()],
+        vec![],
+        Tool::ALL.to_vec(),
+        move |change| {
+            let _ = tx.send(change);
+        },
+    )
     .unwrap();
     coverage(&rx);
     fs::rename(root.join("old"), root.join("new")).unwrap();
@@ -119,9 +130,14 @@ fn title_parent_created_later_and_title_removed_are_reported() {
     let parent = dir.path().join("gemini/antigravity");
     let file = parent.join("conversation_summaries.db");
     let (tx, rx) = mpsc::channel();
-    let _watcher = watch::spawn(vec![], vec![file.clone()], move |change| {
-        let _ = tx.send(change);
-    })
+    let _watcher = watch::spawn(
+        vec![],
+        vec![file.clone()],
+        vec![Tool::Antigravity],
+        move |change| {
+            let _ = tx.send(change);
+        },
+    )
     .unwrap();
     coverage(&rx);
     fs::create_dir_all(&parent).unwrap();
@@ -141,9 +157,14 @@ fn incomplete_coverage_is_reported_and_registration_retries() {
     fs::write(&parent, "not a directory").unwrap();
     let root = parent.join("sessions");
     let (tx, rx) = mpsc::channel();
-    let watcher = watch::spawn(vec![root.clone()], vec![], move |change| {
-        let _ = tx.send(change);
-    })
+    let watcher = watch::spawn(
+        vec![root.clone()],
+        vec![],
+        Tool::ALL.to_vec(),
+        move |change| {
+            let _ = tx.send(change);
+        },
+    )
     .unwrap();
     receive(&rx, |change| matches!(change, Change::Coverage(false)));
     fs::remove_file(&parent).unwrap();

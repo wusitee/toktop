@@ -121,9 +121,20 @@ pub fn title_sources(tools: &[Tool]) -> Vec<PathBuf> {
 /// Whether `path` holds session titles for `tools`: one of
 /// [`title_sources`], or a Kimi Code session's `state.json`.
 pub fn is_title_source(tools: &[Tool], path: &std::path::Path) -> bool {
+    // Cheap filename gate first: this runs for every watched event, and
+    // `title_sources` has to scan the Antigravity provider directories.
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    if !matches!(
+        name,
+        "conversation_summaries.db" | "session_index.jsonl" | "state.json"
+    ) {
+        return false;
+    }
     title_sources(tools).iter().any(|source| source == path)
         || (tools.contains(&Tool::Kimi)
-            && path.file_name().is_some_and(|name| name == "state.json")
+            && name == "state.json"
             && path.starts_with(kimi_sessions()))
 }
 

@@ -101,9 +101,14 @@ fn t3_antigravity_sources_include_conversations_and_skip_artifacts() {
     assert_eq!(store.titles["conversation"], "Gemini task");
 
     let (tx, rx) = std::sync::mpsc::channel();
-    let _watcher = toktop::watch::spawn(vec![root.clone()], vec![titles.clone()], move |change| {
-        let _ = tx.send(change);
-    })
+    let watcher = toktop::watch::spawn(
+        vec![root.clone()],
+        vec![titles.clone()],
+        vec![Tool::Antigravity],
+        move |change| {
+            let _ = tx.send(change);
+        },
+    )
     .unwrap();
     assert!(matches!(
         rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(),
@@ -152,6 +157,34 @@ fn t3_antigravity_sources_include_conversations_and_skip_artifacts() {
     assert!(store.sync_all());
     assert_eq!(store.files.len(), 2);
     assert_eq!(toktop::paths::antigravity_homes().len(), 4);
+
+    // A title file that appears after startup is still reported for a newly
+    // discovered provider; the watcher's title list is not fixed then.
+    watcher.reconcile();
+    let next_titles = root.join("provider-b/antigravity-acp/conversation_summaries.db");
+    rusqlite::Connection::open(&next_titles)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE conversation_summaries (conversation_id text, title text);
+             INSERT INTO conversation_summaries VALUES ('second', 'Second Gemini task');",
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let change = rx
+            .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            .unwrap();
+        if let toktop::watch::Change::Paths(paths) = change {
+            store.update(paths);
+            if store
+                .titles
+                .get("second")
+                .is_some_and(|title| title == "Second Gemini task")
+            {
+                break;
+            }
+        }
+    }
 }
 
 #[test]

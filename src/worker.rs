@@ -243,13 +243,18 @@ fn start_watch(tools: &[Tool], tx: &Sender<Msg>, generation: u32) -> io::Result<
     roots.sort();
     roots.dedup();
     let tx = tx.clone();
-    let watcher = watch::spawn(roots, paths::title_sources(tools), move |change| {
-        let _ = tx.send(match change {
-            watch::Change::Paths(paths) => Msg::Changed(paths),
-            watch::Change::Rescan => Msg::Rescan,
-            watch::Change::Coverage(complete) => Msg::WatchCoverage(generation, complete),
-        });
-    });
+    let watcher = watch::spawn(
+        roots,
+        paths::title_sources(tools),
+        tools.to_vec(),
+        move |change| {
+            let _ = tx.send(match change {
+                watch::Change::Paths(paths) => Msg::Changed(paths),
+                watch::Change::Rescan => Msg::Rescan,
+                watch::Change::Coverage(complete) => Msg::WatchCoverage(generation, complete),
+            });
+        },
+    );
     if let Err(error) = &watcher {
         eprintln!("toktop: file watching unavailable ({error}); polling every {POLL:?}");
     }
