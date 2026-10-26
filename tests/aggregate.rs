@@ -150,7 +150,7 @@ fn summary_counts_free_auto_review_without_unpriced_warning() {
         );
     }
     let prices = PriceTable::from_litellm(LITELLM.as_bytes()).unwrap();
-    let summary = aggregate::summarize(&store, &prices, Period::Today, now);
+    let summary = aggregate::summarize(&store, &prices, Period::Last24Hours, now);
     assert_eq!(summary.unpriced, ["unknown-model"]);
     assert_eq!(summary.total.cost.total(), 0.0);
     assert_eq!(summary.total.tokens.input, 20);
@@ -159,7 +159,7 @@ fn summary_counts_free_auto_review_without_unpriced_warning() {
 
 #[test]
 fn summary_filters_by_period_and_dedups_across_files() {
-    let today = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(); // a Wednesday
+    let today = NaiveDate::from_ymd_opt(2026, 10, 14).unwrap();
     let now = ms(today, 12);
     let monday = NaiveDate::from_ymd_opt(2026, 10, 12).unwrap();
     let last_month = NaiveDate::from_ymd_opt(2026, 9, 30).unwrap();
@@ -204,7 +204,7 @@ fn summary_filters_by_period_and_dedups_across_files() {
         },
     )]));
 
-    let today_summary = aggregate::summarize(&store, &prices, Period::Today, now);
+    let today_summary = aggregate::summarize(&store, &prices, Period::Last24Hours, now);
     assert_eq!(today_summary.total.tokens.input, 103);
     assert_eq!(today_summary.total.tokens.output, 50);
     // The most complete copy's duration goes with its counts.
@@ -212,7 +212,8 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert!((today_summary.total.cost.total() - 1.0).abs() < 1e-9);
     assert!(today_summary.prices_available);
     assert_eq!(today_summary.unpriced, ["gpt-6.1-sol"]);
-    let unavailable = aggregate::summarize(&store, &PriceTable::default(), Period::Today, now);
+    let unavailable =
+        aggregate::summarize(&store, &PriceTable::default(), Period::Last24Hours, now);
     assert!(!unavailable.prices_available);
     assert!(unavailable.unpriced.is_empty());
     assert_eq!(unavailable.total.tokens, today_summary.total.tokens);
@@ -222,7 +223,7 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert!((today_summary.rate_per_min - 3.0 / 5.0).abs() < 1e-9);
     assert_eq!(today_summary.recent_speed, Some(12.5));
 
-    let week = aggregate::summarize(&store, &prices, Period::ThisWeek, now);
+    let week = aggregate::summarize(&store, &prices, Period::Last7Days, now);
     assert_eq!(week.total.tokens.input, 123);
     let all = aggregate::summarize(&store, &prices, Period::AllTime, now);
     assert_eq!(all.total.tokens.input, 130);
@@ -232,7 +233,8 @@ fn summary_filters_by_period_and_dedups_across_files() {
     // An open day's breakdown is independent of the main period and uses
     // the same merged counts, prices and durations as the regular rows.
     assert!(today_summary.day_detail.is_none());
-    let detailed = aggregate::summarize_with_day(&store, &prices, Period::Today, now, Some(today));
+    let detailed =
+        aggregate::summarize_with_day(&store, &prices, Period::Last24Hours, now, Some(today));
     let detail = detailed.day_detail.unwrap();
     assert_eq!(detail.date, today);
     for (actual, expected) in detail.by_model.iter().zip(&today_summary.by_model) {
@@ -247,7 +249,7 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(detailed.total, today_summary.total);
 
     let historical =
-        aggregate::summarize_with_day(&store, &prices, Period::Today, now, Some(last_month));
+        aggregate::summarize_with_day(&store, &prices, Period::Last24Hours, now, Some(last_month));
     let detail = historical.day_detail.unwrap();
     assert_eq!(historical.total, today_summary.total);
     assert_eq!(detail.by_model.len(), 1);
@@ -256,17 +258,17 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert_eq!(detail.by_project[0].key, "/work/app");
     assert_eq!(detail.by_project[0].usage.requests, 1);
     assert_eq!(detail.sessions.len(), 1);
-    let session = &detail.sessions[0];
-    assert_eq!(session.id, "c");
-    assert_eq!(session.title, "Indexed title");
-    assert_eq!(session.usage.tokens.input, 7);
-    assert_eq!(session.first_activity, ms(last_month, 9));
-    assert_eq!(session.last_activity, ms(last_month, 9));
+    let row = &detail.sessions[0];
+    assert_eq!(row.id, "c");
+    assert_eq!(row.title, "Indexed title");
+    assert_eq!(row.usage.tokens.input, 7);
+    assert_eq!(row.first_activity, ms(last_month, 9));
+    assert_eq!(row.last_activity, ms(last_month, 9));
 
     let empty = aggregate::summarize_with_day(
         &store,
         &prices,
-        Period::Today,
+        Period::Last24Hours,
         now,
         Some(today + chrono::Days::new(1)),
     );
@@ -274,6 +276,26 @@ fn summary_filters_by_period_and_dedups_across_files() {
     assert!(detail.by_model.is_empty());
     assert!(detail.by_project.is_empty());
     assert!(detail.sessions.is_empty());
+
+    // Yesterday's request just inside 24 hours is included; the one just
+    // outside is not, regardless of local midnight.
+    let cutoff = now - 24 * 60 * 60 * 1000;
+    store.insert_session(
+        "/boundary.jsonl".into(),
+        Tool::Codex,
+        session(
+            "boundary",
+            "/work/app",
+            "gpt-6.1-sol",
+            vec![(cutoff + 1, 5, None), (cutoff - 1, 11, None)],
+        ),
+    );
+    let rolling = aggregate::summarize(&store, &prices, Period::Last24Hours, now);
+    assert_eq!(
+        rolling.total.tokens.input,
+        today_summary.total.tokens.input + 5
+    );
+    assert_eq!(rolling.total.requests, today_summary.total.requests + 1);
 }
 
 #[test]
@@ -337,7 +359,7 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
     let summary = aggregate::summarize_with_day(
         &store,
         &PriceTable::default(),
-        Period::Today,
+        Period::Last24Hours,
         now,
         Some(today),
     );
@@ -398,7 +420,7 @@ fn subagents_group_under_their_root_session_with_speed_and_streak() {
         };
     }
     recent.insert_session("/fast.jsonl".into(), Tool::Codex, fast);
-    let summary = aggregate::summarize(&recent, &PriceTable::default(), Period::Today, now);
+    let summary = aggregate::summarize(&recent, &PriceTable::default(), Period::Last24Hours, now);
     // A ratio of sums, not the 200 tok/s mean of request speeds.
     assert_eq!(summary.recent_speed, Some(250.0));
 

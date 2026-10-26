@@ -4,9 +4,7 @@ use toktop::aggregate::{self, Period};
 use toktop::{format, store::Store};
 
 fn usage() -> ! {
-    eprintln!(
-        "usage: toktop [--background | --toggle | --settings | --print [today|week|7d|month|30d|all]]"
-    );
+    eprintln!("usage: toktop [--background | --toggle | --settings | --print [24h|7d|30d|all]]");
     std::process::exit(2);
 }
 
@@ -51,7 +49,7 @@ fn main() -> std::process::ExitCode {
 }
 
 fn print(period: Option<&str>) {
-    let Some(period) = Period::from_key(period.unwrap_or("today")) else {
+    let Some(period) = Period::from_key(period.unwrap_or("24h")) else {
         usage();
     };
     let (mut prices, stale) = toktop::cached_prices();

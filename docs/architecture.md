@@ -11,7 +11,7 @@ toktop reads the local logs of AI coding tools, turns them into usage events and
 | `toktop-watch` | Blocks on inotify and forwards changed paths to the worker. |
 | ksni service, `toktop-tray` | Serve the tray icon over D-Bus and push tooltip updates; tray clicks and menu items are forwarded to the GTK main thread. Present only when the tray is registered. |
 
-The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The widget keeps its row slots and only changes their text and visibility on update, adding slots when a breakdown or the sessions list first needs more, up to 100 per list. The detail card is the exception: while open, it is rebuilt from each summary, and closed, it holds no widgets. This keeps per-update CPU low.
+The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, rolling periods aging out, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The widget keeps its row slots and only changes their text and visibility on update, adding slots when a breakdown or the sessions list first needs more, up to 100 per list. The detail card is the exception: while open, it is rebuilt from each summary, and closed, it holds no widgets. This keeps per-update CPU low.
 
 ## Application lifecycle
 
@@ -75,7 +75,9 @@ With the widget shown, toktop uses about 35 MB PSS under GTK's cairo renderer (`
 
 ## Periods
 
-Periods use local time: Today, This week (from Monday), Last 7 days, This month, Last 30 days and All time. The widget's switcher offers Today, This week, This month and All time; the others are available from the tray menu and the config file. The live token rate is tokens per minute over the last five minutes. The streak counts consecutive days with usage ending today, or yesterday when today has none yet. Average speed is described in [accounting.md](accounting.md#response-time-and-speed).
+Periods are rolling windows reaching back a fixed time from now, not to local midnight: Last 24 hours, Last 7 days (7 × 24 hours), Last 30 days (30 × 24 hours) and All time. All four are available on the widget's switcher and in the tray menu. The config file and CLI accept the legacy keys `today`, `week` and `month` as aliases for `24h`, `7d` and `30d`.
+
+The heatmap, trend, streak, day detail cards and per-model daily speed use local calendar days independently of the selected period. The live token rate is tokens per minute over the last five minutes. The streak counts consecutive days with usage ending today, or yesterday when today has none yet. Average speed is described in [accounting.md](accounting.md#response-time-and-speed).
 
 ## Project grouping
 

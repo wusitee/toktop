@@ -161,7 +161,7 @@ impl Anchor {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            period: Period::Today,
+            period: Period::Last24Hours,
             tray: true,
             tools: Tool::ALL.to_vec(),
             widget: Widget::default(),
@@ -237,7 +237,7 @@ mod period_key {
         let key = String::deserialize(deserializer)?;
         Period::from_key(&key).ok_or_else(|| {
             D::Error::custom(format!(
-                "unknown period `{key}`, expected one of today, week, 7d, month, 30d, all"
+                "unknown period `{key}`, expected one of 24h, 7d, 30d, all"
             ))
         })
     }
