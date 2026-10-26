@@ -3,37 +3,31 @@
 use crate::model::{Event, RateLimits, Session, Tokens, Tool};
 use crate::pricing::{Cost, Price, PriceTable};
 use crate::store::Store;
-use chrono::{DateTime, Datelike, Days, Local, NaiveDate, TimeZone};
+use chrono::{DateTime, Days, Local, NaiveDate};
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Period {
     #[default]
-    Today,
-    ThisWeek,
+    Last24Hours,
     Last7Days,
-    ThisMonth,
     Last30Days,
     AllTime,
 }
 
 impl Period {
-    pub const ALL: [Period; 6] = [
-        Period::Today,
-        Period::ThisWeek,
+    pub const ALL: [Period; 4] = [
+        Period::Last24Hours,
         Period::Last7Days,
-        Period::ThisMonth,
         Period::Last30Days,
         Period::AllTime,
     ];
 
     pub fn label(self) -> &'static str {
         match self {
-            Period::Today => "Today",
-            Period::ThisWeek => "This week",
+            Period::Last24Hours => "Last 24 hours",
             Period::Last7Days => "Last 7 days",
-            Period::ThisMonth => "This month",
             Period::Last30Days => "Last 30 days",
             Period::AllTime => "All time",
         }
@@ -42,29 +36,32 @@ impl Period {
     /// Short name used on the command line and in the config file.
     pub fn key(self) -> &'static str {
         match self {
-            Period::Today => "today",
-            Period::ThisWeek => "week",
+            Period::Last24Hours => "24h",
             Period::Last7Days => "7d",
-            Period::ThisMonth => "month",
             Period::Last30Days => "30d",
             Period::AllTime => "all",
         }
     }
 
     pub fn from_key(key: &str) -> Option<Period> {
-        Period::ALL.into_iter().find(|period| period.key() == key)
+        match key {
+            "24h" | "today" => Some(Period::Last24Hours),
+            "7d" | "week" => Some(Period::Last7Days),
+            "30d" | "month" => Some(Period::Last30Days),
+            "all" => Some(Period::AllTime),
+            _ => None,
+        }
     }
 
-    /// First local day included in the period.
-    pub fn start(self, today: NaiveDate) -> NaiveDate {
-        match self {
-            Period::Today => today,
-            Period::ThisWeek => today - Days::new(today.weekday().num_days_from_monday() as u64),
-            Period::Last7Days => today - Days::new(6),
-            Period::ThisMonth => today.with_day(1).unwrap_or(today),
-            Period::Last30Days => today - Days::new(29),
-            Period::AllTime => NaiveDate::MIN,
-        }
+    /// First timestamp included in the period, in milliseconds.
+    pub fn start_ms(self, now_ms: i64) -> i64 {
+        let days = match self {
+            Period::Last24Hours => 1,
+            Period::Last7Days => 7,
+            Period::Last30Days => 30,
+            Period::AllTime => return i64::MIN,
+        };
+        now_ms.saturating_sub(days * 24 * 60 * 60 * 1000)
     }
 }
 
@@ -448,15 +445,7 @@ pub fn summarize_with_day<'a>(
     detail_day: Option<NaiveDate>,
 ) -> Summary {
     let today = local_date(now_ms);
-    let start = period.start(today);
-    let start_ms = if period == Period::AllTime {
-        i64::MIN
-    } else {
-        start
-            .and_hms_opt(0, 0, 0)
-            .and_then(|midnight| Local.from_local_datetime(&midnight).earliest())
-            .map_or(i64::MIN, |time| time.timestamp_millis())
-    };
+    let start_ms = period.start_ms(now_ms);
 
     let mut summary = Summary {
         period,

@@ -19,12 +19,11 @@ use toktop::config::{self, Sections};
 use toktop::format;
 use toktop::model::{LimitWindow, Tool};
 
-/// Periods offered by the switcher. Others can still be chosen from the
-/// tray menu or the config file.
+/// All periods, with their switcher labels.
 const SWITCHER: [(Period, &str); 4] = [
-    (Period::Today, "DAY"),
-    (Period::ThisWeek, "WEEK"),
-    (Period::ThisMonth, "MONTH"),
+    (Period::Last24Hours, "24H"),
+    (Period::Last7Days, "7D"),
+    (Period::Last30Days, "30D"),
     (Period::AllTime, "ALL"),
 ];
 const TREND_DAYS: u64 = 30;
@@ -890,17 +889,9 @@ impl Widget {
     }
 
     pub fn select_period(&self, period: Period) {
-        let mut matched = false;
         for (candidate, button) in &self.period_buttons {
             if *candidate == period {
                 button.set_active(true);
-                matched = true;
-            }
-        }
-        if !matched {
-            // A period without a button, chosen in the tray or config file.
-            for (_, button) in &self.period_buttons {
-                button.set_active(false);
             }
         }
     }

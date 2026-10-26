@@ -44,7 +44,7 @@ touch ~/.local/share/icons/hicolor  # invalidate a stale icon cache
 
 Run `toktop` to show the widget. On Hyprland, Sway, KDE Plasma and other compositors with wlr-layer-shell, it is a desktop widget pinned to the top-right corner below your windows; elsewhere it opens as a small window. It shows:
 
-- total tokens, cost and requests for the selected period (DAY, WEEK, MONTH, ALL), with the cost split into input, cache read, cache write and output
+- total tokens, cost and requests for the selected period (24H, 7D, 30D, ALL), with the cost split into input, cache read, cache write and output
 - recent output speed (tok/s), live tokens per minute, cache hit rate and daily streak
 - Codex rate limits left and their reset times
 - top models, projects or tools with their speed, and recent sessions with their models and subagents
@@ -73,7 +73,7 @@ install -Dm644 data/io.github.wusitee.toktop-autostart.desktop ~/.config/autosta
 Print a summary without the GUI:
 
 ```sh
-toktop --print [today|week|7d|month|30d|all]
+toktop --print [24h|7d|30d|all]
 ```
 
 ## Documentation

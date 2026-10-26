@@ -33,7 +33,7 @@ pub enum Msg {
 const DEBOUNCE: Duration = Duration::from_millis(250);
 /// Upper bound on how long continuous writes can delay an update.
 const MAX_WAIT: Duration = Duration::from_secs(1);
-/// Recompute interval for time-dependent values (token rate, day rollover).
+/// Recompute interval for token rate, rolling periods aging out and day rollover.
 const TICK: Duration = Duration::from_secs(30);
 /// Full rescan interval when inotify is unavailable.
 const POLL: Duration = Duration::from_secs(10);

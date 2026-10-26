@@ -5,7 +5,7 @@ Settings live in `$XDG_CONFIG_HOME/toktop/config.toml` (default `~/.config/tokto
 Most settings can also be changed in the settings window: right-click the widget and choose Settings, use the tray menu, or run `toktop --settings`. Changes there apply immediately, except `tray`. A file that cannot be parsed is reported on stderr and ignored for the session; toktop never overwrites it.
 
 ```toml
-period = "today"                               # today, week, 7d, month, 30d or all
+period = "24h"                                 # 24h, 7d, 30d or all
 tray = true                                    # show a tray icon when a panel supports it
 tools = ["claude-code", "codex", "antigravity", "pi", "kimi-code", "dsh"]
 
@@ -30,7 +30,7 @@ trend = true
 
 | Key | Default | Meaning |
 |---|---|---|
-| `period` | `"today"` | Period shown at startup. Changing the period in the widget or the tray menu saves it. |
+| `period` | `"24h"` | Period shown at startup. Changing the period in the widget or the tray menu saves it. |
 | `tray` | `true` | Register a StatusNotifierItem tray icon. Needs a panel that hosts one, such as waybar, KDE Plasma, or GNOME with the AppIndicator extension. |
 | `tools` | all five | Tools whose logs are read and watched. A disabled tool's directories are not scanned or watched, and its data is dropped. |
 | `widget.layer` | `"bottom"` | Where the widget lives; see [Layers](#layers). |
@@ -41,6 +41,8 @@ trend = true
 | `widget.rows` | `5` | Visible rows in the models, projects and tools list; scroll to reach up to 100 entries in the selected breakdown. |
 | `widget.sessions` | `5` | Recent sessions shown when collapsed; `0` hides the section. The list starts expanded and scrolls through up to 100 sessions of the period in one more row's height. Use the chevron to collapse or expand it. |
 | `widget.sections.*` | `true` | Whether each part of the card is shown. |
+
+The legacy period keys `today`, `week` and `month` are accepted as aliases for `24h`, `7d` and `30d`. Saves use the new keys.
 
 Edits to the file take effect at the next start; the settings window applies them immediately. The `[window]` table of earlier versions is accepted and ignored.
 

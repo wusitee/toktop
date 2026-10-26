@@ -9,6 +9,10 @@ fn missing_and_partial_files_use_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("toktop/config.toml");
     assert_eq!(Config::load(&path).unwrap(), Config::default());
+    assert_eq!(
+        Config::parse("period = \"today\"").unwrap().period,
+        Period::Last24Hours
+    );
 
     // The `[window]` table of earlier versions is accepted and ignored.
     let partial = Config::parse(
@@ -27,7 +31,7 @@ fn saved_settings_round_trip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("toktop/config.toml");
     let config = Config {
-        period: Period::ThisMonth,
+        period: Period::Last30Days,
         tray: false,
         tools: vec![Tool::Codex, Tool::ClaudeCode],
         widget: Widget {
@@ -44,7 +48,7 @@ fn saved_settings_round_trip() {
     config.save(&path).unwrap();
 
     let text = std::fs::read_to_string(&path).unwrap();
-    assert!(text.contains("period = \"month\""), "{text}");
+    assert!(text.contains("period = \"30d\""), "{text}");
     assert!(
         text.contains("tools = [\"codex\", \"claude-code\"]"),
         "{text}"
