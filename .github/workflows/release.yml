@@ -28,7 +28,7 @@ jobs:
         run: |
           name="toktop-${GITHUB_REF_NAME#v}-x86_64-linux"
           mkdir -p "$name/data"
-          cp -r target/release/toktop LICENSE README.md docs "$name/"
+          cp -r target/release/toktop target/release/toktop-collector LICENSE README.md docs "$name/"
           cp -r data/*.desktop data/icons "$name/data/"
           tar -czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"

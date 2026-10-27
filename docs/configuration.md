@@ -32,7 +32,7 @@ trend = true
 |---|---|---|
 | `period` | `"24h"` | Period shown at startup. Changing the period in the widget or the tray menu saves it. |
 | `tray` | `true` | Register a StatusNotifierItem tray icon. Needs a panel that hosts one, such as waybar, KDE Plasma, or GNOME with the AppIndicator extension. |
-| `tools` | all five | Tools whose logs are read and watched. A disabled tool's directories are not scanned or watched, and its data is dropped. |
+| `tools` | all six | Tools whose logs are read and watched. A disabled tool's directories are not scanned or watched, and its data is dropped. |
 | `widget.layer` | `"bottom"` | Where the widget lives; see [Layers](#layers). |
 | `widget.anchor` | `"top-right"` | Screen position of a layer widget. |
 | `widget.margin` | `16` | Distance in pixels from the anchored edges. |
@@ -45,6 +45,33 @@ trend = true
 The legacy period keys `today`, `week` and `month` are accepted as aliases for `24h`, `7d` and `30d`. Saves use the new keys.
 
 Edits to the file take effect at the next start; the settings window applies them immediately. The `[window]` table of earlier versions is accepted and ignored.
+
+## Remote usage over SSH
+
+Install `toktop-collector` on each Linux host using the same release as the desktop. It can be built without GTK or libadwaita:
+
+```sh
+cargo build --release --locked --no-default-features --bin toktop-collector
+install -Dm755 target/release/toktop-collector ~/.local/bin/toktop-collector
+```
+
+The collector still needs SQLite and zstd runtime libraries. Its executable must be on the remote non-interactive SSH `PATH`; check with `ssh dev-server 'toktop-collector --snapshot >/dev/null'`. Set any tool-specific source environment variables for non-interactive SSH as well. When invoked by the desktop, the collector reads only the tools enabled in the desktop settings.
+
+Add SSH host aliases to the local config and restart toktop:
+
+```toml
+[[remote]]
+host = "dev-server"
+
+[[remote]]
+host = "another-server"
+```
+
+Aliases may contain ASCII letters, digits, `.`, `_`, `-` and `@`, and must not begin with `-`. Existing SSH configuration, including jump hosts and identity settings, applies. First connect interactively to establish host trust and set up non-interactive authentication (for example an SSH agent). toktop uses SSH batch mode and cannot prompt for passwords or host-key confirmation.
+
+toktop refreshes each host every 60 seconds, with a 60-second timeout and a 64 MiB response limit. A failed refresh retains that host's last successful snapshot for the lifetime of the app and displays an error with its age; it is not persisted across restarts. `--print` fetches hosts once and reports failures on stderr. Events from different hosts are counted independently, so copied session histories can be counted more than once. Remote Codex limit snapshots are not included in the local limits display.
+
+The collector sends parsed token events, project paths, session titles and prompt excerpts over SSH; it does not send full transcripts. These metadata can contain sensitive information. Snapshots cover all available history, and scans and transfers may take longer on hosts with large logs.
 
 ## Layers
 

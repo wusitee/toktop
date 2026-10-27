@@ -22,10 +22,19 @@ pub struct Config {
     /// Tools whose logs are read.
     #[serde(with = "tool_keys")]
     pub tools: Vec<Tool>,
+    /// SSH host aliases to include in usage totals.
+    pub remote: Vec<Remote>,
     pub widget: Widget,
     /// The `[window]` table of earlier versions, accepted and dropped.
     #[serde(rename = "window", skip_serializing)]
     pub legacy_window: Option<serde::de::IgnoredAny>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Remote {
+    /// An SSH host alias from the user's SSH configuration.
+    pub host: String,
 }
 
 /// Placement and contents of the widget.
@@ -164,6 +173,7 @@ impl Default for Config {
             period: Period::Last24Hours,
             tray: true,
             tools: Tool::ALL.to_vec(),
+            remote: Vec::new(),
             widget: Widget::default(),
             legacy_window: None,
         }

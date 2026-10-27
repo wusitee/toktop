@@ -139,6 +139,60 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
 }
 
 #[test]
+fn remote_hosts_keep_sessions_projects_and_duplicates_separate() {
+    let now = ms(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(), 12);
+    let mut store = Store::with_tools(vec![Tool::Codex]);
+    let parent = session("same", "/work/app", "model", vec![(now, 10, Some("key"))]);
+    let mut child = session(
+        "child",
+        "/work/app",
+        "model",
+        vec![(now, 5, Some("child-key"))],
+    );
+    child.parent = Some("same".into());
+    store.insert_session("/local".into(), Tool::Codex, parent.clone());
+    for host in ["one", "two"] {
+        store.replace_remote(
+            host,
+            vec![
+                (Tool::Codex, parent.clone()),
+                (Tool::Codex, parent.clone()),
+                (Tool::Codex, child.clone()),
+            ],
+        );
+    }
+    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::AllTime, now);
+    assert_eq!(summary.total.tokens.input, 40);
+    assert_eq!(summary.sessions.len(), 3);
+    assert_eq!(
+        summary
+            .sessions
+            .iter()
+            .filter(|row| row.subagents == 1)
+            .count(),
+        2
+    );
+    assert_eq!(summary.by_project.len(), 3);
+    assert!(
+        summary
+            .by_project
+            .iter()
+            .any(|row| row.label.contains("[one]"))
+    );
+    assert!(
+        summary
+            .sessions
+            .iter()
+            .any(|row| row.title.starts_with("[two]"))
+    );
+
+    store.replace_remote("one", vec![]);
+    let summary = aggregate::summarize(&store, &PriceTable::default(), Period::AllTime, now);
+    assert_eq!(summary.total.tokens.input, 25);
+    assert_eq!(summary.sessions.len(), 2);
+}
+
+#[test]
 fn summary_counts_free_auto_review_without_unpriced_warning() {
     let now = ms(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(), 12);
     let mut store = Store::default();

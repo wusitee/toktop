@@ -20,7 +20,7 @@ touch ~/.local/share/icons/hicolor  # invalidate a stale icon cache
 
 ## Build
 
-Requires Rust 1.92+, a C toolchain, `pkg-config`, and GTK 4.12+, libadwaita 1.6+, gtk4-layer-shell, SQLite, OpenSSL and zstd development files. Build with `--no-default-features` to drop the gtk4-layer-shell dependency; the widget is then always a window.
+Requires Rust 1.92+, a C toolchain, `pkg-config`, and GTK 4.12+, libadwaita 1.6+, gtk4-layer-shell, SQLite, OpenSSL and zstd development files. Build with `--no-default-features --features desktop` to drop the gtk4-layer-shell dependency; the widget is then always a window.
 
 ```sh
 # Arch Linux
@@ -75,6 +75,8 @@ Print a summary without the GUI:
 ```sh
 toktop --print [24h|7d|30d|all]
 ```
+
+To include usage from development machines over SSH, install the headless collector on each host and configure its SSH alias as described in [Remote usage over SSH](docs/configuration.md#remote-usage-over-ssh).
 
 ## Documentation
 

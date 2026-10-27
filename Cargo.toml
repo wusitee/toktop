@@ -8,17 +8,27 @@ license = "MIT"
 repository = "https://github.com/wusitee/toktop"
 
 [features]
-default = ["layer-shell"]
+default = ["desktop", "layer-shell"]
+desktop = ["dep:adw", "dep:gtk", "dep:async-channel", "dep:ksni"]
 # Desktop widget on wlr-layer-shell compositors; links libgtk4-layer-shell.
-layer-shell = []
+layer-shell = ["desktop"]
+
+[[bin]]
+name = "toktop"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[[bin]]
+name = "toktop-collector"
+path = "src/bin/collector.rs"
 
 [dependencies]
-adw = { package = "libadwaita", version = "=0.9.2", features = ["v1_6"] }
-async-channel = "=2.5.0"
+adw = { package = "libadwaita", version = "=0.9.2", features = ["v1_6"], optional = true }
+async-channel = { version = "=2.5.0", optional = true }
 chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_12"] }
+gtk = { package = "gtk4", version = "=0.11.5", features = ["v4_12"], optional = true }
 inotify = { version = "=0.11.5", default-features = false }
-ksni = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"] }
+ksni = { version = "=0.3.6", default-features = false, features = ["async-io", "blocking"], optional = true }
 memchr = "=2.8.3"
 rusqlite = "=0.40.2"
 serde = { version = "=1.0.229", features = ["derive"] }

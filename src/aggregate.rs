@@ -261,6 +261,8 @@ pub struct Summary {
     pub codex_limits: Option<RateLimits>,
     /// Models with usage in the period but no known price.
     pub unpriced: Vec<String>,
+    /// Hosts whose latest refresh failed or has not completed.
+    pub remote_errors: Vec<String>,
 }
 
 pub const RATE_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -306,13 +308,17 @@ fn label_projects(rows: &mut [Row]) {
 
 /// Folder name of a project path, for display.
 pub fn project_label(project: &str) -> String {
+    let (host, project) = project
+        .split_once(':')
+        .filter(|(host, path)| !host.contains('/') && path.starts_with('/'))
+        .map_or((None, project), |(host, path)| (Some(host), path));
     let trimmed = project.trim_end_matches('/');
-    trimmed
+    let label = trimmed
         .rsplit('/')
         .next()
         .filter(|name| !name.is_empty())
-        .unwrap_or(trimmed)
-        .to_owned()
+        .unwrap_or(trimmed);
+    host.map_or_else(|| label.to_owned(), |host| format!("{label} [{host}]"))
 }
 
 /// Display labels for project paths: each path's basename, extended by the
@@ -332,7 +338,17 @@ pub fn project_labels(paths: &[&str]) -> Vec<String> {
                 }
                 suffix = path;
             }
-            suffix.to_owned()
+            if let Some((host, _)) = path
+                .split_once(':')
+                .filter(|(host, rest)| !host.contains('/') && rest.starts_with('/'))
+            {
+                format!(
+                    "{} [{host}]",
+                    suffix.strip_prefix(&format!("{host}:")).unwrap_or(suffix)
+                )
+            } else {
+                suffix.to_owned()
+            }
         })
         .collect()
 }
@@ -468,7 +484,17 @@ pub fn summarize_with_day<'a>(
 
     // Iterate in a stable order so cross-file duplicates always resolve to the
     // same file.
-    let mut files: Vec<_> = store.files.iter().collect();
+    let mut files: Vec<_> = store
+        .files
+        .iter()
+        .chain(
+            store
+                .remote
+                .values()
+                .flat_map(|files| files.iter())
+                .filter(|(_, entry)| store.tools.contains(&entry.tool)),
+        )
+        .collect();
     files.sort_by(|a, b| a.0.cmp(b.0));
 
     // A response copied into several files (resumed or forked sessions) is
@@ -595,7 +621,7 @@ pub fn summarize_with_day<'a>(
                     .or_default()
                     .add(&tokens, cost, duration);
             }
-            if now_ms - event.ts <= RATE_WINDOW_MS && event.ts <= now_ms {
+            if event.ts <= now_ms && now_ms.saturating_sub(event.ts) <= RATE_WINDOW_MS {
                 recent_tokens = recent_tokens.saturating_add(tokens.total());
             }
             if duration > 0 && event.ts <= now_ms {
