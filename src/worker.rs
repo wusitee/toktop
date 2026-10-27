@@ -7,6 +7,7 @@ use crate::pricing::PriceTable;
 use crate::store::Store;
 use crate::{paths, watch};
 use chrono::NaiveDate;
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
@@ -27,6 +28,7 @@ pub enum Msg {
     /// Read only these tools from now on. Data of other tools is dropped
     /// and their directories are no longer watched or scanned.
     Tools(Vec<Tool>),
+    Remote(String, Vec<Tool>, Result<crate::remote::Snapshot, String>),
 }
 
 /// Quiet time after a change before it is applied.
@@ -44,6 +46,7 @@ const PRICE_RETRY: Duration = Duration::from_secs(60 * 60);
 pub fn spawn(
     period: Period,
     tools: Vec<Tool>,
+    remote: Vec<crate::config::Remote>,
     emit: impl FnMut(Summary) + Send + 'static,
 ) -> io::Result<Sender<Msg>> {
     let (tx, rx) = mpsc::channel();
@@ -54,6 +57,18 @@ pub fn spawn(
         detail_day: None,
         last: None,
         emit,
+        remote: remote
+            .into_iter()
+            .map(|remote| {
+                (
+                    remote.host,
+                    RemoteState {
+                        error: Some("waiting for first refresh".to_owned()),
+                        last_success: None,
+                    },
+                )
+            })
+            .collect(),
     };
     let fetch_tx = tx.clone();
     std::thread::Builder::new()
@@ -84,17 +99,51 @@ struct State<E> {
     detail_day: Option<NaiveDate>,
     last: Option<Summary>,
     emit: E,
+    remote: HashMap<String, RemoteState>,
+}
+
+struct RemoteState {
+    error: Option<String>,
+    last_success: Option<i64>,
 }
 
 impl<E: FnMut(Summary)> State<E> {
+    fn apply_remote(&mut self, host: String, result: Result<crate::remote::Snapshot, String>) {
+        let state = self.remote.get_mut(&host).expect("configured remote");
+        match result {
+            Ok(snapshot) => {
+                self.store.replace_remote(&host, snapshot.sessions);
+                state.error = None;
+                state.last_success = Some(crate::now_ms());
+            }
+            Err(error) => state.error = Some(error),
+        }
+    }
+
     fn publish(&mut self, tick: bool) {
-        let summary = aggregate::summarize_with_day(
+        let mut summary = aggregate::summarize_with_day(
             &self.store,
             &self.prices,
             self.period,
             crate::now_ms(),
             self.detail_day,
         );
+        summary.remote_errors = self
+            .remote
+            .iter()
+            .filter_map(|(host, state)| {
+                state.error.as_ref().map(|error| {
+                    let age = state.last_success.map_or_else(
+                        || "no data yet".to_owned(),
+                        |time| {
+                            format!("last updated {}", crate::format::ago(time, crate::now_ms()))
+                        },
+                    );
+                    format!("{host}: {error} ({age})")
+                })
+            })
+            .collect();
+        summary.remote_errors.sort();
         if tick || self.last.as_ref() != Some(&summary) {
             self.last = Some(summary.clone());
             (self.emit)(summary);
@@ -124,9 +173,25 @@ impl<E: FnMut(Summary)> State<E> {
         let mut last_change = Instant::now();
         let mut next_tick = Instant::now() + TICK;
         let mut next_poll = Instant::now() + POLL;
+        let mut next_remote = Instant::now();
+        let mut remote_busy = HashSet::new();
 
         loop {
             let now = Instant::now();
+            if now >= next_remote {
+                next_remote = now + Duration::from_secs(60);
+                for host in self.remote.keys() {
+                    if remote_busy.insert(host.clone()) {
+                        let host = host.clone();
+                        let tx = tx.clone();
+                        let tools = self.store.tools.clone();
+                        std::thread::spawn(move || {
+                            let result = crate::remote::fetch(&host, &tools);
+                            let _ = tx.send(Msg::Remote(host, tools, result));
+                        });
+                    }
+                }
+            }
             if next_price_fetch.is_some_and(|at| at <= now) {
                 next_price_fetch = Some(now + PRICE_RETRY);
                 let tx = tx.clone();
@@ -139,6 +204,9 @@ impl<E: FnMut(Summary)> State<E> {
             }
 
             let mut deadline = next_tick;
+            if !self.remote.is_empty() {
+                deadline = deadline.min(next_remote);
+            }
             if let Some(first) = first_change {
                 deadline = deadline.min((last_change + DEBOUNCE).min(first + MAX_WAIT));
             }
@@ -187,12 +255,30 @@ impl<E: FnMut(Summary)> State<E> {
                     pending.clear();
                     rescan = false;
                     first_change = None;
+                    let remote = std::mem::take(&mut self.store.remote);
                     self.store = Store::with_tools(tools);
+                    self.store.remote = remote;
+                    for files in self.store.remote.values_mut() {
+                        files.retain(|_, entry| self.store.tools.contains(&entry.tool));
+                    }
+                    for state in self.remote.values_mut() {
+                        state.error = Some("refreshing after tool selection changed".into());
+                    }
+                    next_remote = Instant::now();
                     self.store.sync_all();
                     self.publish(false);
                     trim_heap();
                 }
                 Ok(Msg::Tools(_)) => {}
+                Ok(Msg::Remote(host, tools, result)) => {
+                    remote_busy.remove(&host);
+                    if tools != self.store.tools {
+                        next_remote = Instant::now();
+                        continue;
+                    }
+                    self.apply_remote(host, result);
+                    self.publish(false);
+                }
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
@@ -274,6 +360,7 @@ mod tests {
             period: Period::AllTime,
             detail_day: None,
             last: None,
+            remote: HashMap::new(),
             emit: |summary| published.push(summary),
         };
         state.publish(false);
@@ -282,5 +369,55 @@ mod tests {
         drop(state);
         assert_eq!(published.len(), 2);
         assert_eq!(published[0], published[1]);
+    }
+
+    #[test]
+    fn remote_error_retains_snapshot_and_reports_its_age() {
+        let mut published = Vec::new();
+        let mut state = State {
+            store: Store::default(),
+            prices: PriceTable::default(),
+            period: Period::AllTime,
+            detail_day: None,
+            last: None,
+            emit: |summary| published.push(summary),
+            remote: HashMap::from([(
+                "dev".to_owned(),
+                RemoteState {
+                    error: None,
+                    last_success: None,
+                },
+            )]),
+        };
+        let mut session = crate::model::Session {
+            id: "a".into(),
+            models: vec!["model".into()],
+            ..Default::default()
+        };
+        session.events.push(crate::model::Event {
+            ts: crate::now_ms(),
+            model: 0,
+            tokens: crate::model::Tokens {
+                input: 10,
+                ..Default::default()
+            },
+            tier: Default::default(),
+            key: None,
+            input_is_split: false,
+            cache_write_1h_raw: 0,
+            duration_ms: 0,
+        });
+        state.apply_remote(
+            "dev".into(),
+            Ok(crate::remote::Snapshot {
+                version: 1,
+                sessions: vec![(Tool::Codex, session)],
+            }),
+        );
+        state.apply_remote("dev".into(), Err("offline".into()));
+        state.publish(false);
+        drop(state);
+        assert_eq!(published[0].total.tokens.input, 10);
+        assert!(published[0].remote_errors[0].contains("offline (last updated"));
     }
 }

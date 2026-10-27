@@ -49,6 +49,8 @@ pub struct Store {
     pub titles: HashMap<String, String>,
     /// Tools whose sources are read; others are ignored.
     pub tools: Vec<Tool>,
+    /// Imported snapshots, separate from files discovered on this machine.
+    pub remote: HashMap<String, HashMap<PathBuf, FileEntry>>,
 }
 
 impl Default for Store {
@@ -119,7 +121,107 @@ impl Store {
             files: HashMap::new(),
             titles: HashMap::new(),
             tools,
+            remote: HashMap::new(),
         }
+    }
+
+    /// Read a complete snapshot, reporting traversal and file errors.
+    pub fn snapshot(&mut self) -> io::Result<Vec<(Tool, Session)>> {
+        fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
+            if !paths::is_source_path(dir) {
+                return Ok(());
+            }
+            let entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", dir.display()),
+                    ));
+                }
+            };
+            for entry in entries {
+                let entry = entry?;
+                let kind = match entry.file_type() {
+                    Ok(kind) => kind,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) => return Err(error),
+                };
+                if kind.is_dir() {
+                    collect(&entry.path(), out)?;
+                } else if kind.is_file() {
+                    out.push(entry.path());
+                }
+            }
+            Ok(())
+        }
+        let mut found = Vec::new();
+        for &tool in &self.tools {
+            for root in paths::source_roots(tool) {
+                let mut files = Vec::new();
+                collect(&root, &mut files)?;
+                found.extend(
+                    files
+                        .into_iter()
+                        .filter(|path| classify(path) == Some(tool))
+                        .map(|path| (path, tool)),
+                );
+            }
+        }
+        found.sort();
+        self.reload_titles();
+        let mut sessions = Vec::new();
+        for (path, tool) in found {
+            let mut session = match read_file(tool, &path) {
+                Ok(entry) => entry.session,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(),
+                        format!("{}: {error}", path.display()),
+                    ));
+                }
+            };
+            if let Some(title) = self.titles.get(&session.id) {
+                session.title = Some(title.clone());
+            }
+            sessions.push((tool, session));
+        }
+        Ok(sessions)
+    }
+
+    /// Replace one host's last complete snapshot.
+    pub fn replace_remote(&mut self, host: &str, sessions: Vec<(Tool, Session)>) {
+        let prefix = format!("\0{}:{host}:", host.len());
+        let mut files = HashMap::new();
+        for (index, (tool, mut session)) in sessions.into_iter().enumerate() {
+            let original_id = session.id.clone();
+            session.id = format!("{prefix}{}", session.id);
+            session.parent = session.parent.map(|parent| format!("{prefix}{parent}"));
+            for event in &mut session.events {
+                event.key = event.key.take().map(|key| format!("{prefix}{key}").into());
+            }
+            let title = session
+                .title
+                .take()
+                .or(session.prompt.take())
+                .unwrap_or_else(|| original_id.chars().take(8).collect());
+            session.title = Some(format!("[{host}] {title}"));
+            session.project = session.project.map(|project| format!("{host}:{project}"));
+            // A remote snapshot may belong to a different account.
+            session.limits = None;
+            files.insert(
+                PathBuf::from(format!("{prefix}{index:020}")),
+                FileEntry {
+                    tool,
+                    session,
+                    cursor: None,
+                    stamp: None,
+                },
+            );
+        }
+        self.remote.insert(host.to_owned(), files);
     }
 
     /// Adds an already-parsed session, as if read from `path`.

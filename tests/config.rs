@@ -34,6 +34,9 @@ fn saved_settings_round_trip() {
         period: Period::Last30Days,
         tray: false,
         tools: vec![Tool::Codex, Tool::ClaudeCode],
+        remote: vec![toktop::config::Remote {
+            host: "dev-server".into(),
+        }],
         widget: Widget {
             layer: Layer::Overlay,
             output: "DP-1".into(),

@@ -59,11 +59,32 @@ fn print(period: Option<&str>) {
             Err(error) => eprintln!("toktop: price refresh failed: {error}"),
         }
     }
-    let tools = toktop::config::Config::load(&toktop::config::path())
-        .map(|config| config.tools)
-        .unwrap_or_else(|_| toktop::model::Tool::ALL.to_vec());
-    let mut store = Store::with_tools(tools);
+    let config = toktop::config::Config::load(&toktop::config::path()).unwrap_or_default();
+    let mut store = Store::with_tools(config.tools);
     store.sync_all();
+    let results = std::thread::scope(|scope| {
+        let handles: Vec<_> = config
+            .remote
+            .into_iter()
+            .map(|remote| {
+                let tools = &store.tools;
+                scope.spawn(move || {
+                    let result = toktop::remote::fetch(&remote.host, tools);
+                    (remote.host, result)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+            .collect::<Vec<_>>()
+    });
+    for (host, result) in results {
+        match result {
+            Ok(snapshot) => store.replace_remote(&host, snapshot.sessions),
+            Err(error) => eprintln!("toktop: remote {host}: {error}"),
+        }
+    }
     let summary = aggregate::summarize(&store, &prices, period, toktop::now_ms());
 
     let cost = |value| {

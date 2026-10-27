@@ -911,18 +911,20 @@ impl Widget {
             .set_label(&display_cost(total.cost.total(), available));
         self.detail
             .set_label(&format!("{} requests", format::grouped(total.requests)));
-        let notice = if !available {
-            Some("Costs hidden until the price list downloads".to_owned())
+        let mut notices = Vec::new();
+        if !available {
+            notices.push("Costs hidden until the price list downloads".to_owned());
         } else if !summary.unpriced.is_empty() {
-            Some(format!(
+            notices.push(format!(
                 "No price for {}; counted as $0",
                 summary.unpriced.join(", ")
-            ))
-        } else {
-            None
-        };
-        self.notice.set_visible(notice.is_some());
-        self.notice.set_label(notice.as_deref().unwrap_or_default());
+            ));
+        }
+        for error in &summary.remote_errors {
+            notices.push(format!("Remote: {error}"));
+        }
+        self.notice.set_visible(!notices.is_empty());
+        self.notice.set_label(&notices.join("\n"));
         let split = self.sections.cost && available && total.cost.total() > 0.0;
         self.cost_split.root.set_visible(split);
         if split {

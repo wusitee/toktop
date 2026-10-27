@@ -1,6 +1,6 @@
 # Architecture
 
-toktop reads the local logs of AI coding tools, turns them into usage events and aggregates them for display. It is a single process with no subprocesses. The only network access is the daily price download. On Hyprland, the widget also asks the compositor's IPC socket for the space reserved by panels.
+toktop reads AI coding tool logs, turns them into usage events and aggregates them for display. Optional remote sources use SSH subprocesses to run a headless collector on each host. The price download is the only other network access. On Hyprland, the widget also asks the compositor's IPC socket for the space reserved by panels.
 
 ## Threads
 
@@ -54,6 +54,8 @@ JSONL files are append-only. Each keeps a `Cursor` (byte offset, inode and parse
 Antigravity databases are re-read whole on change; they are small. A file counts as changed when its inode, size or mtime differs, or those of its SQLite `-wal` sidecar, since commits land there first. A locked or unreadable database keeps its previous snapshot.
 
 The first scan parses all files in parallel on up to 8 threads.
+
+Remote collectors perform a fresh scan and export a versioned JSON snapshot of parsed sessions and resolved titles. The desktop bounds the response and time spent waiting, validates it and replaces only the corresponding host's last complete snapshot. Scan errors fail the export, leaving the previous snapshot in place. Remote sessions, parent links and event keys are scoped to their SSH alias; projects and session titles identify their host. Remote entries stay separate from locally discovered files. Daily dates use the desktop's local timezone. SSH refresh failures appear in the widget and retain the in-memory snapshot; no remote cache is persisted. See [configuration.md](configuration.md#remote-usage-over-ssh).
 
 ## Watching
 
