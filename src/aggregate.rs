@@ -259,6 +259,8 @@ pub struct Summary {
     /// has none yet.
     pub streak_days: u32,
     pub codex_limits: Option<RateLimits>,
+    /// Latest local quota snapshot per Codex home; accounts are never merged.
+    pub codex_limits_by_home: std::collections::BTreeMap<String, RateLimits>,
     /// Models with usage in the period but no known price.
     pub unpriced: Vec<String>,
     /// Hosts whose latest refresh failed or has not completed.
@@ -497,6 +499,26 @@ pub fn summarize_with_day<'a>(
         .collect();
     files.sort_by(|a, b| a.0.cmp(b.0));
 
+    // Intern display keys so model/effort pairs can share the existing breakdowns.
+    let mut model_labels: HashMap<&str, HashMap<Option<String>, String>> = HashMap::new();
+    for (_, entry) in &files {
+        for event in &entry.session.events {
+            let model = entry
+                .session
+                .models
+                .get(event.model as usize)
+                .map_or("unknown", String::as_str);
+            let efforts = model_labels.entry(model).or_default();
+            if !efforts.contains_key(&event.effort) {
+                let label = event
+                    .effort
+                    .as_deref()
+                    .map_or_else(|| model.to_owned(), |effort| format!("{model} · {effort}"));
+                efforts.insert(event.effort.clone(), label);
+            }
+        }
+    }
+
     // A response copied into several files (resumed or forked sessions) is
     // counted once, at its first copy, with the most complete counts seen.
     let mut merged: HashMap<(Tool, &str), Event> = HashMap::new();
@@ -548,24 +570,24 @@ pub fn summarize_with_day<'a>(
     for (_, entry) in files {
         let session = &entry.session;
         let root_id = root(entry.tool, &session.id);
-        let project = session
-            .project
-            .as_deref()
-            .map(|project| project.trim_end_matches('/'));
+        let project = session.project.as_deref().map(|project| {
+            crate::config::project_name(&store.project_group, project.trim_end_matches('/'))
+        });
         let mut session_usage = Usage::default();
         let mut model_tokens: HashMap<&str, u64> = HashMap::new();
         let mut first_activity = i64::MAX;
         let mut last_activity = i64::MIN;
         let mut day_used = false;
         for event in &session.events {
-            let (tokens, merged_duration) = match event.key.as_deref() {
-                // `remove` makes later copies miss and be skipped.
-                Some(key) => match merged.remove(&(entry.tool, key)) {
-                    Some(event) => (event.tokens, Some(event.duration_ms)),
-                    None => continue,
-                },
-                None => (event.tokens, None),
-            };
+            let merged_event = event
+                .key
+                .as_deref()
+                .and_then(|key| merged.remove(&(entry.tool, key)));
+            if event.key.is_some() && merged_event.is_none() {
+                continue;
+            }
+            let effective = merged_event.as_ref().unwrap_or(event);
+            let tokens = effective.tokens;
             // Raw-only Claude snapshots remain pending until duplicates merge.
             if tokens.is_empty() {
                 continue;
@@ -580,7 +602,12 @@ pub fn summarize_with_day<'a>(
                 .or_insert_with(|| prices.lookup(model).copied());
             let cost = price.map_or_else(Cost::default, |price| price.cost(&tokens, event.tier));
 
-            let duration = merged_duration.unwrap_or(event.duration_ms);
+            let duration = effective.duration_ms;
+            let raw_model = model;
+            let model = model_labels
+                .get(model)
+                .and_then(|efforts| efforts.get(&effective.effort))
+                .map_or(model, String::as_str);
             let at = Origin {
                 tool: entry.tool,
                 model,
@@ -635,8 +662,8 @@ pub fn summarize_with_day<'a>(
                 continue;
             }
             // Auto-review is free, so a missing catalog price is expected.
-            if price.is_none() && !prices.is_empty() && model != "codex-auto-review" {
-                unpriced.insert(model.to_owned());
+            if price.is_none() && !prices.is_empty() && raw_model != "codex-auto-review" {
+                unpriced.insert(raw_model.to_owned());
             }
             summary.total.add(&tokens, cost, duration);
             by_tool
@@ -659,13 +686,19 @@ pub fn summarize_with_day<'a>(
             last_activity = last_activity.max(event.ts);
         }
 
-        if let Some(limits) = &session.limits
-            && summary
-                .codex_limits
-                .as_ref()
-                .is_none_or(|known| known.observed < limits.observed)
-        {
-            summary.codex_limits = Some(limits.clone());
+        if let Some(limits) = &session.limits {
+            let home = session
+                .codex_home
+                .as_deref()
+                .unwrap_or("default")
+                .to_owned();
+            let latest = summary
+                .codex_limits_by_home
+                .entry(home)
+                .or_insert_with(|| limits.clone());
+            if latest.observed < limits.observed {
+                *latest = limits.clone();
+            }
         }
 
         if day_used {
@@ -691,7 +724,18 @@ pub fn summarize_with_day<'a>(
         }
     }
 
+    summary.codex_limits = summary
+        .codex_limits_by_home
+        .values()
+        .max_by_key(|limits| limits.observed)
+        .cloned();
     summary.sessions = session_rows(groups, &metadata, &store.titles);
+    for row in &mut summary.sessions {
+        row.project = row
+            .project
+            .as_deref()
+            .map(|path| crate::config::project_name(&store.project_group, path).to_owned());
+    }
 
     let mut tools: Vec<ToolRow> = by_tool
         .into_iter()
@@ -745,6 +789,14 @@ pub fn summarize_with_day<'a>(
             sessions: session_rows(day_groups, &metadata, &store.titles),
         }
     });
+    if let Some(detail) = &mut summary.day_detail {
+        for row in &mut detail.sessions {
+            row.project = row
+                .project
+                .as_deref()
+                .map(|path| crate::config::project_name(&store.project_group, path).to_owned());
+        }
+    }
     summary.rate_per_min = recent_tokens as f64 / (RATE_WINDOW_MS as f64 / 60_000.0);
     let recent = recent_timed.into_iter().fold(
         Usage::default(),

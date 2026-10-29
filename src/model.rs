@@ -24,6 +24,30 @@ impl Tool {
         Tool::Dsh,
     ];
 
+    pub fn accepted_names() -> String {
+        Tool::ALL
+            .into_iter()
+            .map(Tool::key)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    pub fn parse_list(list: &str) -> Result<Vec<Tool>, String> {
+        let mut tools = Vec::new();
+        for key in list.split(',').filter(|key| !key.is_empty()) {
+            let tool = Self::from_key(key).ok_or_else(|| {
+                format!(
+                    "unknown tool `{key}`; valid tools: {}",
+                    Self::accepted_names()
+                )
+            })?;
+            if !tools.contains(&tool) {
+                tools.push(tool);
+            }
+        }
+        Ok(tools)
+    }
+
     /// Short name used in the config file.
     pub fn key(self) -> &'static str {
         match self {
@@ -145,6 +169,9 @@ impl ServiceTier {
 pub struct Event {
     /// Unix epoch milliseconds.
     pub ts: i64,
+    /// Reasoning effort selected for this request, when recorded.
+    #[serde(default)]
+    pub effort: Option<String>,
     /// Index into the owning [`Source::models`] list.
     pub model: u32,
     pub tokens: Tokens,
@@ -176,6 +203,9 @@ impl Event {
             (true, false) => input,
             _ => self.tokens.input,
         };
+        if self.effort.is_none() {
+            self.effort.clone_from(&other.effort);
+        }
         self.input_is_split |= other.input_is_split;
         self.cache_write_1h_raw = self
             .cache_write_1h_raw
@@ -205,6 +235,12 @@ pub struct Session {
     /// Latest Codex rate-limit snapshot observed in this file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limits: Option<RateLimits>,
+    /// Codex home that owns this session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub codex_home: Option<String>,
+    /// All quota observations, including rate-limit-only rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub limit_history: Vec<RateLimits>,
 }
 
 impl Session {

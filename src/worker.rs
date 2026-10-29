@@ -5,7 +5,7 @@ use crate::aggregate::{self, Period, Summary};
 use crate::model::Tool;
 use crate::pricing::PriceTable;
 use crate::store::Store;
-use crate::{paths, watch};
+use crate::watch;
 use chrono::NaiveDate;
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -45,19 +45,19 @@ const PRICE_RETRY: Duration = Duration::from_secs(60 * 60);
 /// for the selected period changes, and on every clock tick.
 pub fn spawn(
     period: Period,
-    tools: Vec<Tool>,
-    remote: Vec<crate::config::Remote>,
+    config: crate::config::Config,
     emit: impl FnMut(Summary) + Send + 'static,
 ) -> io::Result<Sender<Msg>> {
     let (tx, rx) = mpsc::channel();
     let state = State {
-        store: Store::with_tools(tools),
+        store: Store::with_config(&config),
         prices: PriceTable::default(),
         period,
         detail_day: None,
         last: None,
         emit,
-        remote: remote
+        remote: config
+            .remote
             .into_iter()
             .map(|remote| {
                 (
@@ -153,9 +153,10 @@ impl<E: FnMut(Summary)> State<E> {
     fn run(mut self, rx: mpsc::Receiver<Msg>, tx: Sender<Msg>) {
         // Watch before scanning so writes during the scan are queued.
         let mut generation = 0;
-        let mut watcher = start_watch(&self.store.tools, &tx, generation);
+        let mut watcher = start_watch(&self.store, &tx, generation);
         // Coverage is reported by the watcher after registration.
         let mut watching = false;
+        let mut watched_roots = watch_roots(&self.store);
         let (prices, stale) = crate::cached_prices();
         self.prices = prices;
         self.store.sync_all();
@@ -250,13 +251,19 @@ impl<E: FnMut(Summary)> State<E> {
                     // Stop the old watcher before its changes can be queued.
                     drop(watcher);
                     generation += 1;
-                    watcher = start_watch(&tools, &tx, generation);
+                    self.store.tools = tools.clone();
+                    watcher = start_watch(&self.store, &tx, generation);
                     watching = false;
                     pending.clear();
                     rescan = false;
                     first_change = None;
                     let remote = std::mem::take(&mut self.store.remote);
+                    let homes = self.store.codex_homes.clone();
+                    let groups = self.store.project_group.clone();
                     self.store = Store::with_tools(tools);
+                    self.store.codex_homes = homes;
+                    self.store.project_group = groups;
+                    watched_roots = watch_roots(&self.store);
                     self.store.remote = remote;
                     for files in self.store.remote.values_mut() {
                         files.retain(|_, entry| self.store.tools.contains(&entry.tool));
@@ -312,6 +319,15 @@ impl<E: FnMut(Summary)> State<E> {
             }
             if now >= next_tick {
                 next_tick = now + TICK;
+                let roots = watch_roots(&self.store);
+                if roots != watched_roots {
+                    drop(watcher);
+                    generation += 1;
+                    watcher = start_watch(&self.store, &tx, generation);
+                    watched_roots = roots;
+                    watching = false;
+                    self.store.sync_all();
+                }
                 self.publish(true);
             }
         }
@@ -320,19 +336,24 @@ impl<E: FnMut(Summary)> State<E> {
 
 /// Watches the source roots and title indexes of `tools`, forwarding
 /// changes to the worker. Coverage reports carry `generation`.
-fn start_watch(tools: &[Tool], tx: &Sender<Msg>, generation: u32) -> io::Result<watch::Handle> {
-    let mut roots: Vec<PathBuf> = tools
+fn watch_roots(store: &Store) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = store
+        .tools
         .iter()
         .copied()
-        .flat_map(paths::source_roots)
+        .flat_map(|tool| store.roots(tool))
         .collect();
     roots.sort();
     roots.dedup();
+    roots
+}
+
+fn start_watch(store: &Store, tx: &Sender<Msg>, generation: u32) -> io::Result<watch::Handle> {
     let tx = tx.clone();
     let watcher = watch::spawn(
-        roots,
-        paths::title_sources(tools),
-        tools.to_vec(),
+        watch_roots(store),
+        store.title_sources(),
+        store.tools.clone(),
         move |change| {
             let _ = tx.send(match change {
                 watch::Change::Paths(paths) => Msg::Changed(paths),
@@ -395,6 +416,7 @@ mod tests {
             ..Default::default()
         };
         session.events.push(crate::model::Event {
+            effort: None,
             ts: crate::now_ms(),
             model: 0,
             tokens: crate::model::Tokens {

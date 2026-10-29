@@ -32,6 +32,7 @@ use std::collections::HashSet;
 #[derive(Debug, Default)]
 pub struct State {
     model: Option<String>,
+    effort: Option<String>,
     /// Thread snapshots persist across turns; request metadata overrides only this turn.
     thread_tier: Option<ServiceTier>,
     request_tier: Option<ServiceTier>,
@@ -75,6 +76,7 @@ struct Payload {
     started_at: Option<serde_json::Value>,
     cwd: Option<String>,
     model: Option<String>,
+    effort: Option<String>,
     info: Option<Info>,
     rate_limits: Option<Limits>,
     #[serde(default, deserialize_with = "service_tier")]
@@ -301,6 +303,7 @@ impl State {
                 }
                 if self.replaying_before.is_none() {
                     self.request_tier = payload.request_tier();
+                    self.effort = payload.effort;
                 }
                 if payload.model.is_some() {
                     self.model = payload.model;
@@ -467,6 +470,7 @@ impl State {
         let model = session.model_index(self.model.as_deref().unwrap_or("unknown"));
         let key = total.map(|total| format!("{}:{ts}:{}", session.id, total.total()).into());
         session.events.push(Event {
+            effort: self.effort.clone(),
             ts,
             model,
             tokens,
@@ -598,17 +602,20 @@ fn record_limits(session: &mut Session, ts: i64, limits: Limits) {
     if limits.limit_id.as_deref().is_some_and(|id| id != "codex") {
         return;
     }
-    if session
-        .limits
-        .as_ref()
-        .is_some_and(|known| known.observed > ts)
-    {
-        return;
-    }
-    session.limits = Some(RateLimits {
+    let snapshot = RateLimits {
         observed: ts,
         plan: limits.plan_type,
         primary: limits.primary.and_then(Window::into_model),
         secondary: limits.secondary.and_then(Window::into_model),
-    });
+    };
+    if session.limit_history.last() != Some(&snapshot) {
+        session.limit_history.push(snapshot.clone());
+    }
+    if session
+        .limits
+        .as_ref()
+        .is_none_or(|known| known.observed <= ts)
+    {
+        session.limits = Some(snapshot);
+    }
 }

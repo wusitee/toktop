@@ -4,7 +4,10 @@ use toktop::aggregate::{self, Period};
 use toktop::{format, store::Store};
 
 fn usage() -> ! {
-    eprintln!("usage: toktop [--background | --toggle | --settings | --print [24h|7d|30d|all]]");
+    eprintln!(
+        "usage: toktop [--background | --toggle | --settings | --print [24h|7d|30d|all]]\n       toktop {}",
+        toktop::report::USAGE
+    );
     std::process::exit(2);
 }
 
@@ -40,6 +43,13 @@ fn main() -> std::process::ExitCode {
                 std::process::ExitCode::FAILURE
             }
         }
+        Some("report") => match toktop::report::run(&args[1..]) {
+            Ok(()) => std::process::ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("toktop: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        },
         Some("--print") => {
             print(args.get(1).map(String::as_str));
             std::process::ExitCode::SUCCESS
@@ -60,7 +70,7 @@ fn print(period: Option<&str>) {
         }
     }
     let config = toktop::config::Config::load(&toktop::config::path()).unwrap_or_default();
-    let mut store = Store::with_tools(config.tools);
+    let mut store = Store::with_config(&config);
     store.sync_all();
     let results = std::thread::scope(|scope| {
         let handles: Vec<_> = config
@@ -131,9 +141,9 @@ fn print(period: Option<&str>) {
             );
         }
     }
-    if let Some(limits) = &summary.codex_limits {
+    for (home, limits) in &summary.codex_limits_by_home {
         println!(
-            "\nCodex limits ({})",
+            "\nCodex limits ({home}, {})",
             limits.plan.as_deref().unwrap_or("unknown plan")
         );
         for window in [&limits.primary, &limits.secondary].into_iter().flatten() {

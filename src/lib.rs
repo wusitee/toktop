@@ -8,6 +8,7 @@ pub mod parse;
 pub mod paths;
 pub mod pricing;
 pub mod remote;
+pub mod report;
 pub mod store;
 pub mod watch;
 pub mod worker;

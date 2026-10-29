@@ -46,6 +46,24 @@ The legacy period keys `today`, `week` and `month` are accepted as aliases for `
 
 Edits to the file take effect at the next start; the settings window applies them immediately. The `[window]` table of earlier versions is accepted and ignored.
 
+## Extra Codex homes and project groups
+
+Both executables read these settings from their own host’s config:
+
+```toml
+codex_homes = ["~/code/nai-wai-bench/.scratch/*/codex-home"]
+
+[[project_group]]
+name = "nai-wai-bench"
+match = ["/tmp/nwb-*"]
+```
+
+The default Codex home (`CODEX_HOME`, or `~/.codex`) is always included. `codex_homes` and colon-separated `TOKTOP_CODEX_HOMES` add homes; `~/` expands to the current user’s home. Glob patterns expand on each scan. Duplicate homes resolve to one source, including symlink aliases. The widget checks for newly matched homes every 30 seconds and watches their session directories and title indexes.
+
+Project groups match full project paths using glob patterns (`*`, `?`, character classes and `**`). The first matching group wins. Widget breakdowns, session rows, `--print` and reports use the group name. Remote paths match without the host prefix. Original transcript paths remain available to report filters and in snapshots.
+
+Codex quota snapshots stay separate by home. The widget’s bars show the most recently observed home; its tooltip identifies that home and lists the others. `--print` lists each home separately. Homes can use different accounts, and homes sharing an account can show the same account-wide quota.
+
 ## Remote usage over SSH
 
 Install `toktop-collector` on each Linux host using the same release as the desktop. It can be built without GTK or libadwaita:
@@ -55,7 +73,7 @@ cargo build --release --locked --no-default-features --bin toktop-collector
 install -Dm755 target/release/toktop-collector ~/.local/bin/toktop-collector
 ```
 
-The collector still needs SQLite and zstd runtime libraries. Its executable must be on the remote non-interactive SSH `PATH`; check with `ssh dev-server 'toktop-collector --snapshot >/dev/null'`. Set any tool-specific source environment variables for non-interactive SSH as well. When invoked by the desktop, the collector reads only the tools enabled in the desktop settings.
+The collector still needs SQLite and zstd runtime libraries. Its executable must be on the remote non-interactive SSH `PATH`; check with `ssh dev-server 'toktop-collector --snapshot >/dev/null'`. The collector also reads its host’s `toktop/config.toml`, including extra Codex homes. Configure tool-specific environment variables for non-interactive SSH when needed. When invoked by the desktop, the collector reads only the tools enabled in the desktop settings.
 
 Add SSH host aliases to the local config and restart toktop:
 
@@ -135,10 +153,12 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 | `toktop --toggle` | Show or hide the running instance's widget; starts toktop if it is not running. |
 | `toktop --settings` | Open the settings window; starts toktop if it is not running. |
 | `toktop --print [period]` | Print a summary without the GUI. |
+| `toktop report …`, `toktop-collector report …` | Print a filtered, priced accounting report; see [Reports](reports.md). |
 
 ## Environment variables
 
 | Variable | Effect |
 |---|---|
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `KIMI_CODE_HOME`, `DSH_HOME` | Tool data locations; see [sources.md](sources.md). |
+| `TOKTOP_CODEX_HOMES` | Colon-separated extra Codex home paths or globs, in addition to config entries and the default home. |
 | `TOKTOP_DEBUG` | Log window and application lifecycle events to stderr; see [architecture.md](architecture.md#debugging). |

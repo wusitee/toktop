@@ -24,6 +24,9 @@ pub struct Config {
     pub tools: Vec<Tool>,
     /// SSH host aliases to include in usage totals.
     pub remote: Vec<Remote>,
+    /// Additional Codex homes, with tilde and glob expansion on every scan.
+    pub codex_homes: Vec<String>,
+    pub project_group: Vec<ProjectGroup>,
     pub widget: Widget,
     /// The `[window]` table of earlier versions, accepted and dropped.
     #[serde(rename = "window", skip_serializing)]
@@ -35,6 +38,30 @@ pub struct Config {
 pub struct Remote {
     /// An SSH host alias from the user's SSH configuration.
     pub host: String,
+}
+
+/// First matching group wins; patterns match full project paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectGroup {
+    pub name: String,
+    #[serde(rename = "match")]
+    pub patterns: Vec<String>,
+}
+
+pub fn project_name<'a>(groups: &'a [ProjectGroup], path: &'a str) -> &'a str {
+    let raw = path
+        .split_once(':')
+        .filter(|(host, path)| !host.contains('/') && path.starts_with('/'))
+        .map_or(path, |(_, path)| path);
+    groups
+        .iter()
+        .find(|group| {
+            group.patterns.iter().any(|pattern| {
+                glob::Pattern::new(pattern).is_ok_and(|pattern| pattern.matches(raw))
+            })
+        })
+        .map_or(path, |group| group.name.as_str())
 }
 
 /// Placement and contents of the widget.
@@ -174,6 +201,8 @@ impl Default for Config {
             tray: true,
             tools: Tool::ALL.to_vec(),
             remote: Vec::new(),
+            codex_homes: Vec::new(),
+            project_group: Vec::new(),
             widget: Widget::default(),
             legacy_window: None,
         }
@@ -198,6 +227,8 @@ impl Default for Widget {
 #[derive(Debug)]
 pub struct Error(String);
 
+impl std::error::Error for Error {}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -216,7 +247,24 @@ pub fn style_path() -> PathBuf {
 impl Config {
     /// Parses a config file's contents.
     pub fn parse(text: &str) -> Result<Config, Error> {
-        toml::from_str(text).map_err(|error| Error(error.to_string()))
+        let config: Config = toml::from_str(text).map_err(|error| Error(error.to_string()))?;
+        for pattern in config.codex_homes.iter().chain(
+            config
+                .project_group
+                .iter()
+                .flat_map(|group| &group.patterns),
+        ) {
+            glob::Pattern::new(pattern)
+                .map_err(|error| Error(format!("invalid glob `{pattern}`: {error}")))?;
+        }
+        for group in &config.project_group {
+            if group.name.trim().is_empty() || group.patterns.is_empty() {
+                return Err(Error(
+                    "project groups need a name and at least one match pattern".into(),
+                ));
+            }
+        }
+        Ok(config)
     }
 
     /// Reads `path`. A missing file yields defaults; an unreadable or

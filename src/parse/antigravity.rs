@@ -141,6 +141,7 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             .unwrap_or("unknown");
         let model = session.model_index(model);
         session.events.push(Event {
+            effort: None,
             ts,
             model,
             tokens,

@@ -47,6 +47,11 @@ fn saved_settings_round_trip() {
             ..Widget::default()
         },
         legacy_window: None,
+        codex_homes: vec!["~/runs/*/codex-home".into()],
+        project_group: vec![toktop::config::ProjectGroup {
+            name: "bench".into(),
+            patterns: vec!["/tmp/nwb-*".into()],
+        }],
     };
     config.save(&path).unwrap();
 
@@ -85,6 +90,9 @@ fn invalid_files_are_errors() {
         "[widget]\nlayer = \"desktop\"",
         "[widget.sections]\nheatmap = false",
         "period = ",
+        "codex_homes = [\"[\"]",
+        "[[project_group]]\nname = \"\"\nmatch = [\"/tmp/*\"]",
+        "[[project_group]]\nname = \"bench\"\nmatch = [\"[\"]",
     ] {
         assert!(Config::parse(text).is_err(), "{text}");
     }

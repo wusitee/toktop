@@ -16,6 +16,10 @@ fn env_dir(var: &str) -> Option<PathBuf> {
 
 /// Directories scanned (recursively) for a tool's source files.
 pub fn source_roots(tool: Tool) -> Vec<PathBuf> {
+    source_roots_with_homes(tool, &[])
+}
+
+pub fn source_roots_with_homes(tool: Tool, patterns: &[String]) -> Vec<PathBuf> {
     let home = home();
     match tool {
         Tool::ClaudeCode => {
@@ -32,10 +36,10 @@ pub fn source_roots(tool: Tool) -> Vec<PathBuf> {
                 .map(|base| base.join("projects"))
                 .collect()
         }
-        Tool::Codex => {
-            let base = env_dir("CODEX_HOME").unwrap_or_else(|| home.join(".codex"));
-            vec![base.join("sessions"), base.join("archived_sessions")]
-        }
+        Tool::Codex => codex_homes(patterns)
+            .into_iter()
+            .flat_map(|base| [base.join("sessions"), base.join("archived_sessions")])
+            .collect(),
         Tool::Antigravity => vec![
             home.join(".gemini/antigravity/conversations"),
             home.join(".gemini/antigravity-cli/conversations"),
@@ -53,6 +57,44 @@ pub fn source_roots(tool: Tool) -> Vec<PathBuf> {
                 .join("sessions"),
         ],
     }
+}
+
+/// Default Codex home plus configured and environment-supplied extra homes.
+pub fn codex_homes(patterns: &[String]) -> Vec<PathBuf> {
+    try_codex_homes(patterns)
+        .unwrap_or_else(|_| vec![env_dir("CODEX_HOME").unwrap_or_else(|| home().join(".codex"))])
+}
+
+pub fn try_codex_homes(patterns: &[String]) -> std::io::Result<Vec<PathBuf>> {
+    let default = env_dir("CODEX_HOME").unwrap_or_else(|| home().join(".codex"));
+    let extra = env::var("TOKTOP_CODEX_HOMES").unwrap_or_default();
+    let mut homes = vec![default];
+    for pattern in patterns
+        .iter()
+        .map(String::as_str)
+        .chain(extra.split(':').filter(|p| !p.is_empty()))
+    {
+        let expanded = pattern.strip_prefix("~/").map_or_else(
+            || pattern.to_owned(),
+            |rest| home().join(rest).to_string_lossy().into_owned(),
+        );
+        let paths = glob::glob(&expanded).map_err(std::io::Error::other)?;
+        for path in paths {
+            let path =
+                path.map_err(|error| std::io::Error::new(error.error().kind(), error.to_string()))?;
+            if path.is_dir() {
+                homes.push(path);
+            }
+        }
+    }
+    for path in &mut homes {
+        if let Ok(canonical) = path.canonicalize() {
+            *path = canonical;
+        }
+    }
+    homes.sort();
+    homes.dedup();
+    Ok(homes)
 }
 
 /// Kimi Code's session directory.
@@ -104,9 +146,17 @@ pub fn codex_session_index() -> PathBuf {
 
 /// Files outside the source roots that hold session titles for `tools`.
 pub fn title_sources(tools: &[Tool]) -> Vec<PathBuf> {
+    title_sources_with_homes(tools, &[])
+}
+
+pub fn title_sources_with_homes(tools: &[Tool], patterns: &[String]) -> Vec<PathBuf> {
     let mut sources = Vec::new();
     if tools.contains(&Tool::Codex) {
-        sources.push(codex_session_index());
+        sources.extend(
+            codex_homes(patterns)
+                .into_iter()
+                .map(|home| home.join("session_index.jsonl")),
+        );
     }
     if tools.contains(&Tool::Antigravity) {
         sources.extend(

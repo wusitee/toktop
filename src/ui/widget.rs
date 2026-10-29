@@ -986,12 +986,39 @@ impl Widget {
             return;
         };
         self.limits.set_visible(true);
-        self.limits_title.set_label("Codex");
+        let home = summary
+            .codex_limits_by_home
+            .iter()
+            .find(|(_, known)| *known == limits)
+            .map(|(home, _)| home.as_str());
+        self.limits_title
+            .set_label(if summary.codex_limits_by_home.len() > 1 {
+                "Codex · latest home"
+            } else {
+                "Codex"
+            });
         self.limits_plan
             .set_label(&limits.plan.as_deref().map(capitalize).unwrap_or_default());
         self.limits.set_tooltip_text(Some(&format!(
-            "Codex rate limits, from the latest session log ({})",
-            format::ago(limits.observed, now_ms)
+            "Codex rate limits for {} ({})\n{}",
+            home.unwrap_or("default"),
+            format::ago(limits.observed, now_ms),
+            summary
+                .codex_limits_by_home
+                .iter()
+                .map(|(home, limits)| {
+                    let windows = [&limits.primary, &limits.secondary]
+                        .into_iter()
+                        .flatten()
+                        .map(|window| {
+                            format!("{}m: {:.1}%", window.window_minutes, window.used_percent)
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{home}: {windows}")
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
         )));
         let now_s = now_ms / 1000;
         self.limit_slots[0].set(limits.primary.as_ref(), now_s);
