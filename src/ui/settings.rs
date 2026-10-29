@@ -126,7 +126,7 @@ fn sources(config: &Config, change: &Change) -> adw::PreferencesGroup {
         "Tools whose logs are read. A turned-off tool's files are not read or watched.",
     );
     for tool in Tool::ALL {
-        let roots: Vec<String> = paths::source_roots(tool)
+        let roots: Vec<String> = paths::source_roots_with_homes(tool, &config.codex_homes)
             .iter()
             .map(|path| display_path(path))
             .collect();

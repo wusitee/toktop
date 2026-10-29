@@ -148,6 +148,7 @@ impl State {
                 );
                 let model = session.model_index(model);
                 session.events.push(Event {
+                    effort: None,
                     ts,
                     model,
                     tokens,

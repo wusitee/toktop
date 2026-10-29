@@ -1373,3 +1373,63 @@ fn dsh_v4_reads_attempts_and_skips_tagged_fork_seed() {
     assert_eq!(message.duration_ms, 2000);
     assert_eq!(message.key.as_deref(), Some("message:m1"));
 }
+
+#[test]
+fn reasoning_effort_follows_turns_and_survives_partial_copies() {
+    use toktop::model::Session;
+    let mut claude = toktop::parse::claude::State::default();
+    let mut session = Session::default();
+    for line in [
+        r#"{"type":"user","timestamp":"2026-10-29T10:00:00Z","perTurnEffort":"high","message":{"content":"first prompt"}}"#,
+        r#"{"type":"assistant","timestamp":"2026-10-29T10:00:01Z","message":{"id":"a","model":"m","usage":{"input_tokens":3,"output_tokens":2}}}"#,
+        r#"{"type":"user","timestamp":"2026-10-29T10:00:02Z","message":{"content":[{"type":"tool_result","content":"result"}]}}"#,
+        r#"{"type":"assistant","timestamp":"2026-10-29T10:00:03Z","message":{"id":"b","model":"m","usage":{"input_tokens":3,"output_tokens":2}}}"#,
+        r#"{"type":"user","timestamp":"2026-10-29T10:01:00Z","message":{"content":"next prompt"}}"#,
+        r#"{"type":"assistant","timestamp":"2026-10-29T10:01:01Z","message":{"id":"c","model":"m","usage":{"input_tokens":3,"output_tokens":2}}}"#,
+        // A later streaming copy supplies the previously missing effort.
+        r#"{"type":"assistant","timestamp":"2026-10-29T10:01:02Z","effort":"xhigh","message":{"id":"c","model":"m","usage":{"input_tokens":3,"output_tokens":4}}}"#,
+        r#"{"type":"user","timestamp":"2026-10-29T10:02:00Z","message":{"content":"last prompt"}}"#,
+        r#"{"type":"assistant","timestamp":"2026-10-29T10:02:01Z","message":{"id":"d","model":"m","usage":{"input_tokens":3,"output_tokens":2}}}"#,
+    ] {
+        claude.line(&mut session, line.as_bytes());
+    }
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|e| e.effort.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("high"), Some("high"), Some("xhigh"), None]
+    );
+    let mut codex = toktop::parse::codex::State::default();
+    let mut session = Session::default();
+    for (context, total) in [
+        (
+            r#"{"type":"turn_context","payload":{"model":"m","effort":"high"}}"#,
+            10,
+        ),
+        (r#"{"type":"turn_context","payload":{"model":"m"}}"#, 20),
+    ] {
+        codex.line(&mut session, context.as_bytes());
+        codex.line(&mut session, format!(r#"{{"timestamp":"2026-10-29T10:00:00Z","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":{total},"total_tokens":{total}}},"last_token_usage":{{"input_tokens":10,"total_tokens":10}}}}}}}}"#).as_bytes());
+    }
+    assert_eq!(
+        session
+            .events
+            .iter()
+            .map(|e| e.effort.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("high"), None]
+    );
+    let options =
+        toktop::report::Options::parse(&["--by=effort".into()], toktop::now_ms()).unwrap();
+    let report = toktop::report::build(
+        &[(toktop::model::Tool::Codex, session)],
+        &toktop::config::Config::default(),
+        &toktop::pricing::PriceTable::default(),
+        &options,
+    );
+    let json = serde_json::to_value(report).unwrap();
+    assert_eq!(json["groups"][0]["key"]["effort"], serde_json::Value::Null);
+    assert_eq!(json["groups"][1]["key"]["effort"], "high");
+}

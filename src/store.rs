@@ -49,6 +49,8 @@ pub struct Store {
     pub titles: HashMap<String, String>,
     /// Tools whose sources are read; others are ignored.
     pub tools: Vec<Tool>,
+    pub codex_homes: Vec<String>,
+    pub project_group: Vec<crate::config::ProjectGroup>,
     /// Imported snapshots, separate from files discovered on this machine.
     pub remote: HashMap<String, HashMap<PathBuf, FileEntry>>,
 }
@@ -72,17 +74,23 @@ pub fn classify(path: &Path) -> Option<Tool> {
         {
             continue;
         }
-        let matches = match tool {
-            Tool::ClaudeCode => name.ends_with(".jsonl"),
-            Tool::Codex => name.starts_with("rollout-") && name.ends_with(".jsonl"),
-            Tool::Antigravity => name.ends_with(".db"),
-            Tool::Pi => name.ends_with(".jsonl"),
-            Tool::Kimi => name == "wire.jsonl",
-            Tool::Dsh => parse::dsh::generation(name).is_some() && !parse::dsh::superseded(path),
-        };
-        return matches.then_some(tool);
+        return matches_source(tool, name, path).then_some(tool);
     }
     None
+}
+
+fn matches_source(tool: Tool, name: &str, path: &Path) -> bool {
+    if !paths::is_source_path(path) {
+        return false;
+    }
+    match tool {
+        Tool::ClaudeCode => name.ends_with(".jsonl"),
+        Tool::Codex => name.starts_with("rollout-") && name.ends_with(".jsonl"),
+        Tool::Antigravity => name.ends_with(".db"),
+        Tool::Pi => name.ends_with(".jsonl"),
+        Tool::Kimi => name == "wire.jsonl",
+        Tool::Dsh => parse::dsh::generation(name).is_some() && !parse::dsh::superseded(path),
+    }
 }
 
 /// Maps SQLite sidecar files (`-wal`, `-shm`, `-journal`) to their database.
@@ -122,11 +130,42 @@ impl Store {
             titles: HashMap::new(),
             tools,
             remote: HashMap::new(),
+            codex_homes: Vec::new(),
+            project_group: Vec::new(),
         }
+    }
+
+    pub fn with_config(config: &crate::config::Config) -> Self {
+        let mut store = Self::with_tools(config.tools.clone());
+        store.codex_homes.clone_from(&config.codex_homes);
+        store.project_group.clone_from(&config.project_group);
+        store
+    }
+
+    pub fn roots(&self, tool: Tool) -> Vec<PathBuf> {
+        paths::source_roots_with_homes(tool, &self.codex_homes)
+    }
+
+    pub fn title_sources(&self) -> Vec<PathBuf> {
+        paths::title_sources_with_homes(&self.tools, &self.codex_homes)
+    }
+
+    fn classify(&self, path: &Path) -> Option<Tool> {
+        if !paths::is_source_path(path) {
+            return None;
+        }
+        let name = path.file_name()?.to_str()?;
+        self.tools.iter().copied().find(|&tool| {
+            self.roots(tool).iter().any(|root| path.starts_with(root))
+                && matches_source(tool, name, path)
+        })
     }
 
     /// Read a complete snapshot, reporting traversal and file errors.
     pub fn snapshot(&mut self) -> io::Result<Vec<(Tool, Session)>> {
+        if self.tools.contains(&Tool::Codex) {
+            paths::try_codex_homes(&self.codex_homes)?;
+        }
         fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
             if !paths::is_source_path(dir) {
                 return Ok(());
@@ -158,18 +197,23 @@ impl Store {
         }
         let mut found = Vec::new();
         for &tool in &self.tools {
-            for root in paths::source_roots(tool) {
+            for root in self.roots(tool) {
                 let mut files = Vec::new();
                 collect(&root, &mut files)?;
                 found.extend(
                     files
                         .into_iter()
-                        .filter(|path| classify(path) == Some(tool))
+                        .filter(|path| {
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| matches_source(tool, name, path))
+                        })
                         .map(|path| (path, tool)),
                 );
             }
         }
         found.sort();
+        found.dedup();
         self.reload_titles();
         let mut sessions = Vec::new();
         for (path, tool) in found {
@@ -211,6 +255,8 @@ impl Store {
             session.project = session.project.map(|project| format!("{host}:{project}"));
             // A remote snapshot may belong to a different account.
             session.limits = None;
+            session.limit_history.clear();
+            session.codex_home = None;
             files.insert(
                 PathBuf::from(format!("{prefix}{index:020}")),
                 FileEntry {
@@ -248,17 +294,23 @@ impl Store {
     pub fn discover(&self) -> Vec<(PathBuf, Tool)> {
         let mut found = Vec::new();
         for &tool in &self.tools {
-            for root in paths::source_roots(tool) {
+            for root in self.roots(tool) {
                 let mut files = Vec::new();
                 walk(&root, &mut files);
                 found.extend(
                     files
                         .into_iter()
-                        .filter(|path| classify(path) == Some(tool))
+                        .filter(|path| {
+                            path.file_name()
+                                .and_then(|name| name.to_str())
+                                .is_some_and(|name| matches_source(tool, name, path))
+                        })
                         .map(|path| (path, tool)),
                 );
             }
         }
+        found.sort();
+        found.dedup();
         found
     }
 
@@ -326,14 +378,15 @@ impl Store {
         for path in paths {
             let path = source_path(&path);
             let known = self.files.get(&path).map(|entry| entry.tool);
-            let classified = classify(&path);
+            let classified = self.classify(&path);
             if known == Some(Tool::Dsh) && classified.is_none() && path.exists() {
                 // A later dsh generation replaced this log.
                 changed |= self.files.remove(&path).is_some();
                 continue;
             }
             let Some(tool) = classified.or(known) else {
-                titles_dirty |= paths::is_title_source(&self.tools, &path);
+                titles_dirty |= self.title_sources().contains(&path)
+                    || paths::is_title_source(&self.tools, &path);
                 continue;
             };
             if !self.tools.contains(&tool) {
@@ -394,7 +447,9 @@ impl Store {
             ));
         }
         if self.tools.contains(&Tool::Codex) {
-            titles.extend(codex_titles(&paths::codex_session_index()));
+            for home in paths::codex_homes(&self.codex_homes) {
+                titles.extend(codex_titles(&home.join("session_index.jsonl")));
+            }
         }
         if self.tools.contains(&Tool::Kimi) {
             titles.extend(crate::parse::kimi::titles(&paths::kimi_sessions()));
@@ -408,7 +463,18 @@ impl Store {
 fn read_file(tool: Tool, path: &Path) -> io::Result<FileEntry> {
     // Stamp first: a write racing the parse makes the entry stale, not lost.
     let stamp = Stamp::read(path);
-    let (session, cursor) = parse::parse_full(tool, path)?;
+    let (mut session, cursor) = parse::parse_full(tool, path)?;
+    if tool == Tool::Codex {
+        session.codex_home = path
+            .ancestors()
+            .find(|ancestor| {
+                ancestor
+                    .file_name()
+                    .is_some_and(|name| name == "sessions" || name == "archived_sessions")
+            })
+            .and_then(Path::parent)
+            .map(|home| home.to_string_lossy().into_owned());
+    }
     Ok(FileEntry {
         tool,
         session,

@@ -87,6 +87,12 @@ Source: `usage` on `assistant/message` lines (one per settled model call), `assi
 - Events are keyed by message id or compaction id, and counted once across files.
 - The session id, project (`cwd`) and parent (`parentSession`) come from the `session` header; the title from the latest `session/title` line. Only user-typed `user/message` lines (`source.kind` `user`) give the prompt.
 
+## Reasoning effort
+
+Events carry nullable `effort` metadata. Codex takes it from the current `turn_context.effort`; a context without effort clears the previous value. Claude Code reads `perTurnEffort`, then `effort`, from transcript lines, retains it across tool results, and clears it at a new typed prompt when no value is supplied. Streaming and cross-file copies preserve a known value when another copy omits it. Other tools leave it null.
+
+Model breakdowns label recorded efforts as `model · effort`; pricing still resolves the original model id. Reports can group model and effort independently. See [reports.md](reports.md) for the report schema and filtering rules.
+
 ## Response time and speed
 
 Each event may carry a response time (`duration_ms`): from the request, the latest prompt or tool result before the response, to the last output written for it. It includes time to first token, thinking and any retries, so speeds are end-to-end and lower than a model's raw decode rate.

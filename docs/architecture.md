@@ -11,7 +11,7 @@ toktop reads AI coding tool logs, turns them into usage events and aggregates th
 | `toktop-watch` | Blocks on inotify and forwards changed paths to the worker. |
 | ksni service, `toktop-tray` | Serve the tray icon over D-Bus and push tooltip updates; tray clicks and menu items are forwarded to the GTK main thread. Present only when the tray is registered. |
 
-The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, rolling periods aging out, relative times and day rollover. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The widget keeps its row slots and only changes their text and visibility on update, adding slots when a breakdown or the sessions list first needs more, up to 100 per list. The detail card is the exception: while open, it is rebuilt from each summary, and closed, it holds no widgets. This keeps per-update CPU low.
+The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes) and recomputes every 30 s for time-dependent values: the live token rate, rolling periods aging out, relative times and day rollover. It also re-expands configured Codex home patterns and replaces watches when roots change. Prices refresh in a short-lived thread once a day. Without inotify, or while any required watch is missing, the worker falls back to a full rescan every 10 s. Incomplete watch registration is retried on each poll or rescan. Every tick publishes the summary so relative times and Codex limit countdowns stay current. The widget keeps its row slots and only changes their text and visibility on update, adding slots when a breakdown or the sessions list first needs more, up to 100 per list. The detail card is the exception: while open, it is rebuilt from each summary, and closed, it holds no widgets. This keeps per-update CPU low.
 
 ## Application lifecycle
 
@@ -27,7 +27,7 @@ The worker debounces changes (250 ms quiet, at most 1 s behind continuous writes
 ## Data flow
 
 1. **Discover.** `Store` walks each tool's source roots ([sources.md](sources.md)).
-2. **Parse.** Each source file becomes one `Session`: events (timestamp, model, tokens, optional dedup key), project, title and Codex rate limits.
+2. **Parse.** Each source file becomes one `Session`: events (timestamp, model, nullable reasoning effort, tokens, optional dedup key), project, title and Codex rate limits.
 3. **Aggregate.** `summarize` filters events by period, merges copies of one response across files, prices each event and builds the breakdowns ([accounting.md](accounting.md), [pricing.md](pricing.md)).
 
 Opening a day detail card requests full model, project and grouped session breakdowns for that local date, independently of the main period. The worker builds them from cached events in the existing aggregation pass and includes them in `Summary.day_detail`. The card groups models, projects and tools behind the same tabs as the main card, and scrolls that breakdown and the sessions list independently through up to 100 entries. Day drill-downs share those data and open in one reusable secondary popover, leaving the day overview visible. The secondary panel closes independently; closing or switching the day also closes it. Only one day's breakdowns are retained, and closing the card, switching to a period detail or hiding the widget releases them. Navigation adds no threads, timers, file reads or network requests.
@@ -45,7 +45,8 @@ Opening a day detail card requests full model, project and grouped session break
 | `src/watch.rs` | Recursive inotify watcher. |
 | `src/worker.rs` | Worker thread loop. |
 | `src/ui/` | Application shell (`mod.rs`), the card (`widget.rs`, `style.css`), the detail card (`detail.rs`), heatmap and trend charts, settings window, layer-shell bindings, Hyprland reserved-space query and tray icon. |
-| `src/config.rs` | Settings file. |
+| `src/config.rs` | Settings file and project-group matching. |
+| `src/report.rs` | Shared headless report CLI, filtering, nested grouping, pricing metadata and per-home quota windows. |
 
 ## Incremental reads
 

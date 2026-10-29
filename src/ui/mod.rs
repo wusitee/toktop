@@ -198,12 +198,11 @@ impl Shell {
     fn start(self: &Rc<Self>) {
         adw::StyleManager::default().set_color_scheme(adw::ColorScheme::ForceDark);
         load_style();
-        let (period, tools, remote, want_tray, layer) = {
+        let (period, worker_config, want_tray, layer) = {
             let config = self.config.borrow();
             (
                 config.period,
-                config.tools.clone(),
-                config.remote.clone(),
+                config.clone(),
                 config.tray,
                 config.widget.layer,
             )
@@ -224,7 +223,7 @@ impl Shell {
         }
 
         let (tx, rx) = async_channel::unbounded::<Summary>();
-        match worker::spawn(period, tools, remote, move |summary| {
+        match worker::spawn(period, worker_config, move |summary| {
             let _ = tx.send_blocking(summary);
         }) {
             Ok(worker) => {

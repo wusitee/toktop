@@ -120,6 +120,7 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
         events: events
             .into_iter()
             .map(|(ts, input, key)| Event {
+                effort: None,
                 ts,
                 model: 0,
                 tier: ServiceTier::Standard,
@@ -135,6 +136,8 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
             .collect(),
         parent: None,
         limits: None,
+        codex_home: None,
+        limit_history: Vec::new(),
     }
 }
 

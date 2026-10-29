@@ -150,6 +150,8 @@ impl Price {
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PriceTable {
     prices: HashMap<String, Price>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fetched_at: Option<String>,
     /// Bare model name (after the last `/`) -> full key of the preferred entry.
     #[serde(skip)]
     bare: HashMap<String, String>,
@@ -170,6 +172,7 @@ impl PriceTable {
     pub fn from_prices(prices: HashMap<String, Price>) -> Self {
         let mut table = PriceTable {
             prices,
+            fetched_at: None,
             bare: HashMap::new(),
         };
         table.index();
@@ -203,6 +206,63 @@ impl PriceTable {
 
     pub fn is_empty(&self) -> bool {
         self.prices.is_empty()
+    }
+
+    /// Apply complete per-model tariffs in USD per million tokens.
+    pub fn apply_overrides(
+        &mut self,
+        path: &Path,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Overrides {
+            models: HashMap<String, Rates>,
+        }
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Rates {
+            input: f64,
+            output: f64,
+            cache_read: Option<f64>,
+            cache_write: Option<f64>,
+            cache_write_1h: Option<f64>,
+        }
+        let overrides: Overrides = toml::from_str(&std::fs::read_to_string(path)?)?;
+        let mut names = Vec::new();
+        for (name, rates) in overrides.models {
+            if name.trim().is_empty()
+                || [
+                    Some(rates.input),
+                    Some(rates.output),
+                    rates.cache_read,
+                    rates.cache_write,
+                    rates.cache_write_1h,
+                ]
+                .into_iter()
+                .flatten()
+                .any(|rate| !rate.is_finite() || rate < 0.0)
+            {
+                return Err(format!(
+                    "invalid price for `{name}`: rates must be finite and nonnegative"
+                )
+                .into());
+            }
+            self.prices.insert(
+                aliases::canonical_id(&name),
+                Price {
+                    input: rates.input / 1_000_000.0,
+                    output: rates.output / 1_000_000.0,
+                    cache_read: rates.cache_read.map(|rate| rate / 1_000_000.0),
+                    cache_write: rates.cache_write.map(|rate| rate / 1_000_000.0),
+                    cache_write_1h: rates.cache_write_1h.map(|rate| rate / 1_000_000.0),
+                    ..Price::default()
+                },
+            );
+            names.push(name);
+        }
+        self.index();
+        names.sort();
+        Ok(names)
     }
 
     fn exact(&self, name: &str) -> Option<&Price> {
@@ -342,7 +402,10 @@ impl PriceTable {
             .with_config()
             .limit(32 * 1024 * 1024)
             .read_to_vec()?;
-        Ok(Self::from_litellm(&body)?)
+        let mut table = Self::from_litellm(&body)?;
+        table.fetched_at =
+            Some(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        Ok(table)
     }
 }
 

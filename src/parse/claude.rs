@@ -28,6 +28,7 @@ pub struct State {
     last_input: Option<i64>,
     /// Whether the title came from a user rename, which outranks AI titles.
     custom_title: bool,
+    effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -43,6 +44,8 @@ struct Line {
     ai_title: Option<String>,
     custom_title: Option<String>,
     summary: Option<String>,
+    effort: Option<String>,
+    per_turn_effort: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -139,6 +142,9 @@ impl State {
         let has_usage = contains(raw, b"\"usage\"");
         if !has_usage {
             let user = contains(raw, b"\"type\":\"user\"");
+            if user && user_prompt(raw).is_some() {
+                self.effort = None;
+            }
             if user || contains(raw, b"\"type\":\"attachment\"") {
                 // The first timestamp key is the line's own; nested objects come later.
                 if let Some(ts) = first_timestamp(raw) {
@@ -154,12 +160,18 @@ impl State {
             && !wants_project
             && !contains(raw, b"-title\"")
             && !contains(raw, b"\"summary\"")
+            && !contains(raw, b"\"effort\"")
+            && !contains(raw, b"\"perTurnEffort\"")
         {
             return;
         }
         let Ok(line) = serde_json::from_slice::<Line>(raw) else {
             return;
         };
+
+        if let Some(effort) = line.per_turn_effort.as_ref().or(line.effort.as_ref()) {
+            self.effort = Some(effort.clone());
+        }
 
         if session.id.is_empty()
             && let Some(id) = line.session_id.as_deref()
@@ -233,6 +245,7 @@ impl State {
         key: Option<String>,
     ) {
         let mut event = Event {
+            effort: self.effort.clone(),
             ts,
             model: 0,
             tokens: usage.tokens(),

@@ -24,3 +24,7 @@ Costs are kept per kind (input, cache read, cache write, output with reasoning) 
 ## Service tiers
 
 Codex priority (fast) requests use LiteLLM's explicit priority rates. Long-context priority rates apply only when the model's long-context tier applies; models without a long-context tier keep their base priority rates at any prompt size. A missing priority rate falls back to twice the standard rate for that request's context length, matching tokscale's premium; cache-write rates double too. Other tiers (default, flex, unspecified) use standard pricing.
+
+## Report overrides
+
+Reports accept `--price-file PATH` with complete per-model tariffs in USD per million tokens. Overrides apply after loading or refreshing LiteLLM prices and do not change the cache or widget prices. See [reports.md](reports.md#prices) for the file format.

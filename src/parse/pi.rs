@@ -187,6 +187,7 @@ fn record(
         .map_or(0, |ms| ms as u32);
     let model = session.model_index(model.as_deref().unwrap_or("unknown"));
     session.events.push(Event {
+        effort: None,
         ts,
         model,
         tokens,

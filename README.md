@@ -83,6 +83,7 @@ To include usage from development machines over SSH, install the headless collec
 - [Architecture](docs/architecture.md): threads, application lifecycle, modules, watching, memory
 - [Sources](docs/sources.md): where each tool's logs are read from
 - [Token accounting](docs/accounting.md): per-tool parsing and deduplication rules, response times, session titles
+- [Reports](docs/reports.md): headless filtered accounting, JSON schema, price overrides and quota observations
 - [Pricing](docs/pricing.md): price source, model lookup and cost rules
 - [Configuration](docs/configuration.md): settings file, widget layers, Hyprland setup, style and command line
 - [Releasing](docs/releasing.md): cutting a release
