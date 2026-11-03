@@ -53,6 +53,8 @@ const ALIASES: &[(&str, &str)] = &[
     ("gpt-daybreak-blue-latest", "gpt-5.6-sol"),
     ("kimi-code/k3", "moonshot/kimi-k3"),
     ("kimi-code/k3-256k", "moonshot/kimi-k3"),
+    ("kimi-code/k3.1-pro", "moonshot/kimi-k3.1-pro"),
+    ("kimi-code/kimi-for-coding", "tencent/kimi-k2.8-preview"),
     ("model_openai_gpt_oss_120b_medium", "gpt-oss-120b-medium"),
     ("model_placeholder_m132", "gemini-3.5-flash-high"),
     ("model_placeholder_m133", "gemini-3.5-flash-high"),
