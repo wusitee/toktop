@@ -18,6 +18,8 @@ const LITELLM: &str = r#"{
     "azure/gpt-6.1-sol": {"mode": "chat", "input_cost_per_token": 9e-06, "output_cost_per_token": 9e-05},
     "openai/gpt-6.1-sol": {"mode": "chat", "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05,
         "input_cost_per_token_above_272k_tokens": 4e-06, "output_cost_per_token_above_272k_tokens": 2e-05},
+    "tencent/kimi-k2.8-preview": {"mode": "chat", "input_cost_per_token": 1e-06, "output_cost_per_token": 4e-06},
+    "moonshot/kimi-k3.1-pro": {"mode": "chat", "input_cost_per_token": 2e-06, "output_cost_per_token": 1e-05},
     "text-embedding-x": {"mode": "embedding", "input_cost_per_token": 1e-07, "output_cost_per_token": 0}
 }"#;
 
@@ -45,6 +47,8 @@ fn litellm_table_resolves_tool_model_ids() {
         ("gemini-pro-default", "gemini-3.1-pro-preview"),
         ("MODEL_PLACEHOLDER_M37", "gemini-3.1-pro-preview"),
         ("openai/gpt-daybreak-blue-latest", "gpt-5.6-sol"),
+        ("kimi-code/k3.1-pro", "moonshot/kimi-k3.1-pro"),
+        ("kimi-code/kimi-for-coding", "tencent/kimi-k2.8-preview"),
     ] {
         assert_eq!(table.lookup(alias), table.lookup(target), "{alias}");
     }
