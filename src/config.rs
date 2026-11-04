@@ -24,8 +24,10 @@ pub struct Config {
     pub tools: Vec<Tool>,
     /// SSH host aliases to include in usage totals.
     pub remote: Vec<Remote>,
-    /// Additional Codex homes, with tilde and glob expansion on every scan.
+    /// Additional Codex homes, merged into `sources.codex`.
     pub codex_homes: Vec<String>,
+    #[serde(skip_serializing_if = "Sources::is_empty")]
+    pub sources: Sources,
     pub project_group: Vec<ProjectGroup>,
     pub widget: Widget,
     /// The `[window]` table of earlier versions, accepted and dropped.
@@ -38,6 +40,42 @@ pub struct Config {
 pub struct Remote {
     /// An SSH host alias from the user's SSH configuration.
     pub host: String,
+}
+
+/// Additional homes per tool, in the form of the tool's location variable,
+/// with tilde and glob expansion on every scan. Defaults are always read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sources {
+    #[serde(rename = "claude-code", skip_serializing_if = "Vec::is_empty")]
+    pub claude_code: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub codex: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub antigravity: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pi: Vec<String>,
+    #[serde(rename = "kimi-code", skip_serializing_if = "Vec::is_empty")]
+    pub kimi: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub dsh: Vec<String>,
+}
+
+impl Sources {
+    pub fn get(&self, tool: Tool) -> &[String] {
+        match tool {
+            Tool::ClaudeCode => &self.claude_code,
+            Tool::Codex => &self.codex,
+            Tool::Antigravity => &self.antigravity,
+            Tool::Pi => &self.pi,
+            Tool::Kimi => &self.kimi,
+            Tool::Dsh => &self.dsh,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        Tool::ALL.into_iter().all(|tool| self.get(tool).is_empty())
+    }
 }
 
 /// First matching group wins; patterns match full project paths.
@@ -202,6 +240,7 @@ impl Default for Config {
             tools: Tool::ALL.to_vec(),
             remote: Vec::new(),
             codex_homes: Vec::new(),
+            sources: Sources::default(),
             project_group: Vec::new(),
             widget: Widget::default(),
             legacy_window: None,
@@ -248,7 +287,10 @@ impl Config {
     /// Parses a config file's contents.
     pub fn parse(text: &str) -> Result<Config, Error> {
         let config: Config = toml::from_str(text).map_err(|error| Error(error.to_string()))?;
-        for pattern in config.codex_homes.iter().chain(
+        let sources = Tool::ALL
+            .into_iter()
+            .flat_map(|tool| config.sources.get(tool));
+        for pattern in config.codex_homes.iter().chain(sources).chain(
             config
                 .project_group
                 .iter()
@@ -265,6 +307,13 @@ impl Config {
             }
         }
         Ok(config)
+    }
+
+    /// Configured extra homes, with `codex_homes` among the Codex ones.
+    pub fn source_dirs(&self) -> Sources {
+        let mut sources = self.sources.clone();
+        sources.codex.extend(self.codex_homes.iter().cloned());
+        sources
     }
 
     /// Reads `path`. A missing file yields defaults; an unreadable or

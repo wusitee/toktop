@@ -48,6 +48,10 @@ fn saved_settings_round_trip() {
         },
         legacy_window: None,
         codex_homes: vec!["~/runs/*/codex-home".into()],
+        sources: toktop::config::Sources {
+            pi: vec!["~/.pi-nwb".into()],
+            ..Default::default()
+        },
         project_group: vec![toktop::config::ProjectGroup {
             name: "bench".into(),
             patterns: vec!["/tmp/nwb-*".into()],
@@ -91,6 +95,8 @@ fn invalid_files_are_errors() {
         "[widget.sections]\nheatmap = false",
         "period = ",
         "codex_homes = [\"[\"]",
+        "[sources]\npi = [\"[\"]",
+        "[sources]\ncursor = [\"~/.cursor\"]",
         "[[project_group]]\nname = \"\"\nmatch = [\"/tmp/*\"]",
         "[[project_group]]\nname = \"bench\"\nmatch = [\"[\"]",
     ] {

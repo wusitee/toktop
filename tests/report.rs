@@ -61,7 +61,7 @@ impl Fixture {
                 json!({"type":"assistant","timestamp":"2026-10-29T10:00:01Z","sessionId":"claude-one","message":{"id":"a","model":"unpriced-model-1","usage":{"input_tokens":3,"output_tokens":2}}}),
             ],
         );
-        let config = Config::parse("tools = [\"codex\", \"claude-code\"]\ncodex_homes = [\"~/runs/*/codex-home\", \"~/.codex\"]\n[[project_group]]\nname = \"nai-wai-bench\"\nmatch = [\"/tmp/nwb-*\"]\n").unwrap();
+        let config = Config::parse("tools = [\"codex\", \"claude-code\", \"pi\"]\ncodex_homes = [\"~/runs/*/codex-home\", \"~/.codex\"]\n[sources]\npi = [\"~/runs/*/pi-agent\"]\n[[project_group]]\nname = \"nai-wai-bench\"\nmatch = [\"/tmp/nwb-*\"]\n").unwrap();
         config
             .save(&dir.path().join("config/toktop/config.toml"))
             .unwrap();
@@ -260,7 +260,7 @@ fn report_rejects_bad_options_and_prices_without_emitting_json() {
 }
 
 #[test]
-fn new_codex_homes_are_found_on_rescan_and_widget_groups_match_report() {
+fn new_extra_homes_are_found_on_rescan_and_widget_groups_match_report() {
     // Use the existing subprocess pattern to isolate environment discovery.
     const CHILD: &str = "TOKTOP_REPORT_RESCAN_CHILD";
     if std::env::var_os(CHILD).is_none() {
@@ -268,7 +268,7 @@ fn new_codex_homes_are_found_on_rescan_and_widget_groups_match_report() {
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
-                "new_codex_homes_are_found_on_rescan_and_widget_groups_match_report",
+                "new_extra_homes_are_found_on_rescan_and_widget_groups_match_report",
             ])
             .env(CHILD, "1")
             .env("HOME", fixture.dir.path())
@@ -276,6 +276,8 @@ fn new_codex_homes_are_found_on_rescan_and_widget_groups_match_report() {
             .env("XDG_CONFIG_HOME", fixture.dir.path().join("config"))
             .env("CLAUDE_CONFIG_DIR", fixture.dir.path().join("claude"))
             .env_remove("TOKTOP_CODEX_HOMES")
+            .env_remove("PI_CODING_AGENT_DIR")
+            .env_remove("PI_CODING_AGENT_SESSION_DIR")
             .output()
             .unwrap();
         assert!(
@@ -298,8 +300,16 @@ fn new_codex_homes_are_found_on_rescan_and_widget_groups_match_report() {
         &home.join("session_index.jsonl"),
         &[json!({"id":"three","thread_name":"New benchmark"})],
     );
+    write_lines(
+        &Path::new(&std::env::var("HOME").unwrap())
+            .join("runs/three/pi-agent/sessions/--tmp-nwb-pi-three--/pi-three.jsonl"),
+        &[
+            json!({"type":"session","version":3,"id":"pi-three","timestamp":"2026-10-29T10:00:00.000Z","cwd":"/tmp/nwb-pi-three"}),
+            json!({"type":"message","id":"a1","parentId":null,"timestamp":"2026-10-29T10:00:02.000Z","message":{"role":"assistant","model":"egg-alpha","responseId":"r1","usage":{"input":5,"output":1,"cacheRead":0,"cacheWrite":0,"totalTokens":6},"timestamp":1793268001000i64}}),
+        ],
+    );
     assert!(store.sync_all());
-    assert_eq!(store.files.len(), before + 1);
+    assert_eq!(store.files.len(), before + 2);
     assert_eq!(store.titles["three"], "New benchmark");
     let summary = toktop::aggregate::summarize(
         &store,
@@ -312,7 +322,7 @@ fn new_codex_homes_are_found_on_rescan_and_widget_groups_match_report() {
         .iter()
         .find(|row| row.key == "nai-wai-bench")
         .unwrap();
-    assert_eq!(project.usage.requests, 3);
+    assert_eq!(project.usage.requests, 4);
     assert!(
         summary
             .by_model
