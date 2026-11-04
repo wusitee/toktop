@@ -77,12 +77,21 @@ pub fn homes(tool: Tool, extra: &[String]) -> Vec<PathBuf> {
 
 /// Default homes of `tool` plus the directories matching `extra` and, for
 /// Codex, `TOKTOP_CODEX_HOMES`, without duplicates or symlink aliases.
+/// Defaults keep their spelling, except Codex homes, which are all resolved.
 pub fn try_homes(tool: Tool, extra: &[String]) -> std::io::Result<Vec<PathBuf>> {
+    let canonical = |path: &Path| path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let from_env = match tool {
         Tool::Codex => env::var("TOKTOP_CODEX_HOMES").unwrap_or_default(),
         _ => String::new(),
     };
     let mut homes = default_homes(tool);
+    if tool == Tool::Codex {
+        for path in &mut homes {
+            *path = canonical(path);
+        }
+    }
+    let mut seen: Vec<PathBuf> = homes.iter().map(|path| canonical(path)).collect();
+    let mut added = Vec::new();
     for pattern in extra
         .iter()
         .map(String::as_str)
@@ -96,18 +105,18 @@ pub fn try_homes(tool: Tool, extra: &[String]) -> std::io::Result<Vec<PathBuf>> 
         for path in paths {
             let path =
                 path.map_err(|error| std::io::Error::new(error.error().kind(), error.to_string()))?;
-            if path.is_dir() {
-                homes.push(path);
+            let path = canonical(&path);
+            if path.is_dir() && !seen.contains(&path) {
+                seen.push(path.clone());
+                added.push(path);
             }
         }
     }
-    for path in &mut homes {
-        if let Ok(canonical) = path.canonicalize() {
-            *path = canonical;
-        }
+    added.sort();
+    homes.extend(added);
+    if tool == Tool::Codex {
+        homes.sort();
     }
-    homes.sort();
-    homes.dedup();
     Ok(homes)
 }
 
