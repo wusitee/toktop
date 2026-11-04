@@ -49,7 +49,8 @@ pub struct Store {
     pub titles: HashMap<String, String>,
     /// Tools whose sources are read; others are ignored.
     pub tools: Vec<Tool>,
-    pub codex_homes: Vec<String>,
+    /// Configured extra homes per tool.
+    pub sources: crate::config::Sources,
     pub project_group: Vec<crate::config::ProjectGroup>,
     /// Imported snapshots, separate from files discovered on this machine.
     pub remote: HashMap<String, HashMap<PathBuf, FileEntry>>,
@@ -130,24 +131,36 @@ impl Store {
             titles: HashMap::new(),
             tools,
             remote: HashMap::new(),
-            codex_homes: Vec::new(),
+            sources: crate::config::Sources::default(),
             project_group: Vec::new(),
         }
     }
 
     pub fn with_config(config: &crate::config::Config) -> Self {
         let mut store = Self::with_tools(config.tools.clone());
-        store.codex_homes.clone_from(&config.codex_homes);
+        store.sources = config.source_dirs();
         store.project_group.clone_from(&config.project_group);
         store
     }
 
     pub fn roots(&self, tool: Tool) -> Vec<PathBuf> {
-        paths::source_roots_with_homes(tool, &self.codex_homes)
+        paths::source_roots_with(tool, self.sources.get(tool))
     }
 
     pub fn title_sources(&self) -> Vec<PathBuf> {
-        paths::title_sources_with_homes(&self.tools, &self.codex_homes)
+        paths::title_sources_with(&self.tools, &self.sources)
+    }
+
+    /// Whether `path` holds titles: a [`Self::title_sources`] file or a Kimi
+    /// Code session's `state.json`.
+    fn is_title_source(&self, path: &Path) -> bool {
+        self.title_sources().iter().any(|source| source == path)
+            || (self.tools.contains(&Tool::Kimi)
+                && path.file_name().is_some_and(|name| name == "state.json")
+                && self
+                    .roots(Tool::Kimi)
+                    .iter()
+                    .any(|root| path.starts_with(root)))
     }
 
     fn classify(&self, path: &Path) -> Option<Tool> {
@@ -163,8 +176,8 @@ impl Store {
 
     /// Read a complete snapshot, reporting traversal and file errors.
     pub fn snapshot(&mut self) -> io::Result<Vec<(Tool, Session)>> {
-        if self.tools.contains(&Tool::Codex) {
-            paths::try_codex_homes(&self.codex_homes)?;
+        for &tool in &self.tools {
+            paths::try_homes(tool, self.sources.get(tool))?;
         }
         fn collect(dir: &Path, out: &mut Vec<PathBuf>) -> io::Result<()> {
             if !paths::is_source_path(dir) {
@@ -385,8 +398,7 @@ impl Store {
                 continue;
             }
             let Some(tool) = classified.or(known) else {
-                titles_dirty |= self.title_sources().contains(&path)
-                    || paths::is_title_source(&self.tools, &path);
+                titles_dirty |= self.is_title_source(&path);
                 continue;
             };
             if !self.tools.contains(&tool) {
@@ -443,16 +455,18 @@ impl Store {
         let mut titles = HashMap::new();
         if self.tools.contains(&Tool::Antigravity) {
             titles.extend(crate::parse::antigravity::titles(
-                &paths::antigravity_homes(),
+                &paths::antigravity_homes_with(self.sources.get(Tool::Antigravity)),
             ));
         }
         if self.tools.contains(&Tool::Codex) {
-            for home in paths::codex_homes(&self.codex_homes) {
+            for home in paths::homes(Tool::Codex, self.sources.get(Tool::Codex)) {
                 titles.extend(codex_titles(&home.join("session_index.jsonl")));
             }
         }
         if self.tools.contains(&Tool::Kimi) {
-            titles.extend(crate::parse::kimi::titles(&paths::kimi_sessions()));
+            for sessions in self.roots(Tool::Kimi) {
+                titles.extend(crate::parse::kimi::titles(&sessions));
+            }
         }
         let changed = titles != self.titles;
         self.titles = titles;

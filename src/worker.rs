@@ -258,10 +258,10 @@ impl<E: FnMut(Summary)> State<E> {
                     rescan = false;
                     first_change = None;
                     let remote = std::mem::take(&mut self.store.remote);
-                    let homes = self.store.codex_homes.clone();
+                    let sources = self.store.sources.clone();
                     let groups = self.store.project_group.clone();
                     self.store = Store::with_tools(tools);
-                    self.store.codex_homes = homes;
+                    self.store.sources = sources;
                     self.store.project_group = groups;
                     watched_roots = watch_roots(&self.store);
                     self.store.remote = remote;

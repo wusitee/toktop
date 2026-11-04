@@ -46,19 +46,34 @@ The legacy period keys `today`, `week` and `month` are accepted as aliases for `
 
 Edits to the file take effect at the next start; the settings window applies them immediately. The `[window]` table of earlier versions is accepted and ignored.
 
-## Extra Codex homes and project groups
+## Extra source homes and project groups
 
 Both executables read these settings from their own host’s config:
 
 ```toml
-codex_homes = ["~/code/nai-wai-bench/.scratch/*/codex-home"]
+[sources]
+codex = ["~/code/nai-wai-bench/.scratch/*/codex-home"]
+pi = ["~/.pi-nwb"]
 
 [[project_group]]
 name = "nai-wai-bench"
 match = ["/tmp/nwb-*"]
 ```
 
-The default Codex home (`CODEX_HOME`, or `~/.codex`) is always included. `codex_homes` and colon-separated `TOKTOP_CODEX_HOMES` add homes; `~/` expands to the current user’s home. Glob patterns expand on each scan. Duplicate homes resolve to one source, including symlink aliases. The widget checks for newly matched homes every 30 seconds and watches their session directories and title indexes.
+`[sources]` adds homes for `claude-code`, `codex`, `antigravity`, `pi`, `kimi-code` and `dsh`. Each entry names a directory of the kind the tool’s location variable names, and toktop reads the same subdirectories it reads in the default home:
+
+| Key | Entry is like | Sessions read from |
+|---|---|---|
+| `claude-code` | `CLAUDE_CONFIG_DIR` | `projects/` |
+| `codex` | `CODEX_HOME` | `sessions/`, `archived_sessions/`, plus `session_index.jsonl` titles and quota |
+| `antigravity` | `~/.gemini/antigravity` | `conversations/`, plus `conversation_summaries.db` titles |
+| `pi` | `PI_CODING_AGENT_DIR` | `sessions/` |
+| `kimi-code` | `KIMI_CODE_HOME` | `sessions/` |
+| `dsh` | `DSH_HOME` | `sessions/` |
+
+Default homes, including those set through environment variables, are always read. `~/` expands to the current user’s home, and glob patterns expand on each scan. Duplicate homes resolve to one source, including symlink aliases. The widget checks for newly matched homes every 30 seconds and watches their session directories and title files. The settings window lists every directory read for each tool.
+
+The top-level `codex_homes` list and colon-separated `TOKTOP_CODEX_HOMES` also add Codex homes, in the same way as `[sources].codex`.
 
 Project groups match full project paths using glob patterns (`*`, `?`, character classes and `**`). The first matching group wins. Widget breakdowns, session rows, `--print` and reports use the group name. Remote paths match without the host prefix. Original transcript paths remain available to report filters and in snapshots.
 
@@ -73,7 +88,7 @@ cargo build --release --locked --no-default-features --bin toktop-collector
 install -Dm755 target/release/toktop-collector ~/.local/bin/toktop-collector
 ```
 
-The collector still needs SQLite and zstd runtime libraries. Its executable must be on the remote non-interactive SSH `PATH`; check with `ssh dev-server 'toktop-collector --snapshot >/dev/null'`. The collector also reads its host’s `toktop/config.toml`, including extra Codex homes. Configure tool-specific environment variables for non-interactive SSH when needed. When invoked by the desktop, the collector reads only the tools enabled in the desktop settings.
+The collector still needs SQLite and zstd runtime libraries. Its executable must be on the remote non-interactive SSH `PATH`; check with `ssh dev-server 'toktop-collector --snapshot >/dev/null'`. The collector also reads its host’s `toktop/config.toml`, including extra source homes. Configure tool-specific environment variables for non-interactive SSH when needed. When invoked by the desktop, the collector reads only the tools enabled in the desktop settings.
 
 Add SSH host aliases to the local config and restart toktop:
 
@@ -160,5 +175,5 @@ The widget is styled with GTK CSS. `$XDG_CONFIG_HOME/toktop/style.css`, if prese
 | Variable | Effect |
 |---|---|
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, `KIMI_CODE_HOME`, `DSH_HOME` | Tool data locations; see [sources.md](sources.md). |
-| `TOKTOP_CODEX_HOMES` | Colon-separated extra Codex home paths or globs, in addition to config entries and the default home. |
+| `TOKTOP_CODEX_HOMES` | Colon-separated extra Codex home paths or globs, in addition to `[sources].codex`, `codex_homes` and the default home. |
 | `TOKTOP_DEBUG` | Log window and application lifecycle events to stderr; see [architecture.md](architecture.md#debugging). |
