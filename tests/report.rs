@@ -323,11 +323,12 @@ fn new_extra_homes_are_found_on_rescan_and_widget_groups_match_report() {
         .find(|row| row.key == "nai-wai-bench")
         .unwrap();
     assert_eq!(project.usage.requests, 4);
+    // Model breakdowns ignore the recorded effort.
     assert!(
         summary
             .by_model
             .iter()
-            .any(|row| row.label == "bench-model-1 · xhigh")
+            .any(|row| row.label == "bench-model-1")
     );
     assert_eq!(summary.codex_limits_by_home.len(), 3);
 }

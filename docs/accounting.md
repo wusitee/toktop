@@ -91,7 +91,7 @@ Source: `usage` on `assistant/message` lines (one per settled model call), `assi
 
 Events carry nullable `effort` metadata. Codex takes it from the current `turn_context.effort`; a context without effort clears the previous value. Claude Code reads `perTurnEffort`, then `effort`, from transcript lines, retains it across tool results, and clears it at a new typed prompt when no value is supplied. Streaming and cross-file copies preserve a known value when another copy omits it. Other tools leave it null.
 
-Model breakdowns label recorded efforts as `model · effort`; pricing still resolves the original model id. Reports can group model and effort independently. See [reports.md](reports.md) for the report schema and filtering rules.
+Model breakdowns combine all efforts of a model into one row. Reports can group model and effort independently. See [reports.md](reports.md) for the report schema and filtering rules.
 
 ## Response time and speed
 
