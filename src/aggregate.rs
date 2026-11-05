@@ -499,26 +499,6 @@ pub fn summarize_with_day<'a>(
         .collect();
     files.sort_by(|a, b| a.0.cmp(b.0));
 
-    // Intern display keys so model/effort pairs can share the existing breakdowns.
-    let mut model_labels: HashMap<&str, HashMap<Option<String>, String>> = HashMap::new();
-    for (_, entry) in &files {
-        for event in &entry.session.events {
-            let model = entry
-                .session
-                .models
-                .get(event.model as usize)
-                .map_or("unknown", String::as_str);
-            let efforts = model_labels.entry(model).or_default();
-            if !efforts.contains_key(&event.effort) {
-                let label = event
-                    .effort
-                    .as_deref()
-                    .map_or_else(|| model.to_owned(), |effort| format!("{model} · {effort}"));
-                efforts.insert(event.effort.clone(), label);
-            }
-        }
-    }
-
     // A response copied into several files (resumed or forked sessions) is
     // counted once, at its first copy, with the most complete counts seen.
     let mut merged: HashMap<(Tool, &str), Event> = HashMap::new();
@@ -603,11 +583,6 @@ pub fn summarize_with_day<'a>(
             let cost = price.map_or_else(Cost::default, |price| price.cost(&tokens, event.tier));
 
             let duration = effective.duration_ms;
-            let raw_model = model;
-            let model = model_labels
-                .get(model)
-                .and_then(|efforts| efforts.get(&effective.effort))
-                .map_or(model, String::as_str);
             let at = Origin {
                 tool: entry.tool,
                 model,
@@ -662,8 +637,8 @@ pub fn summarize_with_day<'a>(
                 continue;
             }
             // Auto-review is free, so a missing catalog price is expected.
-            if price.is_none() && !prices.is_empty() && raw_model != "codex-auto-review" {
-                unpriced.insert(raw_model.to_owned());
+            if price.is_none() && !prices.is_empty() && model != "codex-auto-review" {
+                unpriced.insert(model.to_owned());
             }
             summary.total.add(&tokens, cost, duration);
             by_tool
