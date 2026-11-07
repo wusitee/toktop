@@ -146,6 +146,45 @@ fn session(id: &str, project: &str, model: &str, events: Vec<(i64, u64, Option<&
 }
 
 #[test]
+fn model_breakdowns_combine_reasoning_efforts() {
+    let date = NaiveDate::from_ymd_opt(2026, 11, 7).unwrap();
+    let now = ms(date, 12);
+    let mut store = Store::with_tools(vec![Tool::Codex, Tool::ClaudeCode]);
+    for (tool, model) in [
+        (Tool::Codex, "gpt-6.1-sol"),
+        (Tool::ClaudeCode, "claude-opus-5-5"),
+    ] {
+        for (index, effort) in [None, Some("high"), Some("xhigh")].into_iter().enumerate() {
+            let id = format!("{model}-{index}");
+            let mut source = session(&id, "/work/app", model, vec![(now, 10, None)]);
+            source.events[0].effort = effort.map(str::to_owned);
+            store.insert_session(id.into(), tool, source);
+        }
+    }
+    let summary = aggregate::summarize_with_day(
+        &store,
+        &PriceTable::default(),
+        Period::AllTime,
+        now,
+        Some(date),
+    );
+    for rows in [
+        &summary.by_model,
+        &summary.day_detail.as_ref().unwrap().by_model,
+    ] {
+        assert_eq!(rows.len(), 2);
+        for model in ["gpt-6.1-sol", "claude-opus-5-5"] {
+            let row = rows.iter().find(|row| row.key == model).unwrap();
+            assert_eq!(row.label, model);
+            assert_eq!(row.usage.tokens.input, 30);
+            assert_eq!(row.usage.requests, 3);
+        }
+    }
+    assert_eq!(summary.total.tokens.input, 60);
+    assert_eq!(summary.total.requests, 6);
+}
+
+#[test]
 fn remote_hosts_keep_sessions_projects_and_duplicates_separate() {
     let now = ms(NaiveDate::from_ymd_opt(2026, 10, 14).unwrap(), 12);
     let mut store = Store::with_tools(vec![Tool::Codex]);
