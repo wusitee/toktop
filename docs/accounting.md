@@ -102,7 +102,7 @@ Each event may carry a response time (`duration_ms`): from the request, the late
 - **Pi.** The message `timestamp` (set when the response starts) to the entry's write time.
 - **Kimi Code.** The first `llm.request` of the agent loop (`kind` `loop`) since the previous turn usage, to the next `turn`-scope `usage.record`. `turn.prompt` and `turn.ended` drop a request left unanswered by a cancelled, failed or interrupted turn. Retries are included; side calls and `session`-scope usage neither start nor end a request.
 - **dsh.** The step's `step/start`, or the latest `llm/retry-started`, to its `assistant/message`, `assistant/attempt` or usage sample; a compaction's `compaction/start` to its summary.
-- **Antigravity.** The generation's `time_to_first_token` (`chatModel.#11`) plus its `streaming_duration` (`chatModel.#12`), both recorded by Antigravity; generations missing either have no duration.
+- **Antigravity.** The generation's `time_to_first_token` (`chatModel.#11`) plus its `streaming_duration` (`chatModel.#12`), both recorded by Antigravity. They cover only the final attempt and failed attempts record no duration, so a retried generation (`chatModel.#14` above zero or an attempt in `chatModel.#17` with an error) has no duration; so does one missing either field.
 
 Times of zero or over 15 minutes (a lost request start) are discarded. Average speed is the ratio of sums, output plus reasoning tokens over response time, across timed requests; untimed requests do not count. Rows, sessions and model days average over their own requests; the widget's SPEED tile averages the latest 20 timed requests, whatever the period, so it follows the model in use.
 

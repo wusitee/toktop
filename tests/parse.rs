@@ -449,28 +449,41 @@ fn antigravity_reads_generation_metadata() {
     conn.execute("INSERT INTO steps VALUES (2, ?1)", [&step])
         .unwrap();
 
-    let first = generation(
-        Some(2),
-        &[(1, 1000), (2, 500), (5, 200), (9, 30), (10, 70)],
-        "resp-1",
-        "gemini-3.8-flash-n",
-        None,
-        None,
-    );
     // Response time: 1.5 s to the first token, then 0.5 s of streaming.
-    let mut chat = parse::proto::bytes(&first, 1).unwrap().to_vec();
-    let mut first_token = Vec::new();
-    field_varint(&mut first_token, 1, 1);
-    field_varint(&mut first_token, 2, 500_000_000);
-    field_bytes(&mut chat, 11, &first_token);
-    let mut streaming = Vec::new();
-    field_varint(&mut streaming, 2, 500_000_000);
-    field_bytes(&mut chat, 12, &streaming);
-    let mut first = Vec::new();
-    field_bytes(&mut first, 1, &chat);
-    field_varint(&mut first, 2, 2);
-    // The same response recorded twice must count once.
-    for (idx, blob) in [first.clone(), first].iter().enumerate() {
+    let timed = |response: &str, failed_attempt: bool| {
+        let blob = generation(
+            Some(2),
+            &[(1, 1000), (2, 500), (5, 200), (9, 30), (10, 70)],
+            response,
+            "gemini-3.8-flash-n",
+            None,
+            None,
+        );
+        let mut chat = parse::proto::bytes(&blob, 1).unwrap().to_vec();
+        let mut first_token = Vec::new();
+        field_varint(&mut first_token, 1, 1);
+        field_varint(&mut first_token, 2, 500_000_000);
+        field_bytes(&mut chat, 11, &first_token);
+        let mut streaming = Vec::new();
+        field_varint(&mut streaming, 2, 500_000_000);
+        field_bytes(&mut chat, 12, &streaming);
+        if failed_attempt {
+            let mut attempt = Vec::new();
+            field_bytes(&mut attempt, 3, b"request failed");
+            field_bytes(&mut chat, 17, &attempt);
+        }
+        let mut root = Vec::new();
+        field_bytes(&mut root, 1, &chat);
+        field_varint(&mut root, 2, 2);
+        root
+    };
+    let first = timed("resp-1", false);
+    // The same response recorded twice must count once. A retried generation
+    // times only its final attempt, so it stays untimed.
+    for (idx, blob) in [first.clone(), first, timed("resp-2", true)]
+        .iter()
+        .enumerate()
+    {
         conn.execute(
             "INSERT INTO gen_metadata VALUES (?1, ?2)",
             rusqlite::params![idx as i64, blob],
@@ -489,7 +502,8 @@ fn antigravity_reads_generation_metadata() {
     assert!(cursor.is_none());
     assert_eq!(session.id, "conv-1");
     assert_eq!(session.project.as_deref(), Some("/work/app"));
-    assert_eq!(session.events.len(), 1);
+    assert_eq!(session.events.len(), 2);
+    assert_eq!(session.events[1].duration_ms, 0);
     let event = &session.events[0];
     assert_eq!(event.ts, 1_790_000_100_000);
     assert_eq!(event.duration_ms, 2000);
