@@ -457,6 +457,18 @@ fn antigravity_reads_generation_metadata() {
         None,
         None,
     );
+    // Response time: 1.5 s to the first token, then 0.5 s of streaming.
+    let mut chat = parse::proto::bytes(&first, 1).unwrap().to_vec();
+    let mut first_token = Vec::new();
+    field_varint(&mut first_token, 1, 1);
+    field_varint(&mut first_token, 2, 500_000_000);
+    field_bytes(&mut chat, 11, &first_token);
+    let mut streaming = Vec::new();
+    field_varint(&mut streaming, 2, 500_000_000);
+    field_bytes(&mut chat, 12, &streaming);
+    let mut first = Vec::new();
+    field_bytes(&mut first, 1, &chat);
+    field_varint(&mut first, 2, 2);
     // The same response recorded twice must count once.
     for (idx, blob) in [first.clone(), first].iter().enumerate() {
         conn.execute(
@@ -480,6 +492,7 @@ fn antigravity_reads_generation_metadata() {
     assert_eq!(session.events.len(), 1);
     let event = &session.events[0];
     assert_eq!(event.ts, 1_790_000_100_000);
+    assert_eq!(event.duration_ms, 2000);
     assert_eq!(
         event.tokens,
         Tokens {

@@ -3,7 +3,9 @@
 //! Each `gen_metadata` row is one generation, a protobuf without a published
 //! schema. Field numbers follow tokscale's reverse-engineered layout:
 //!
-//! - root `#1` chatModel: `#4` usage, `#9.#4` legacy timestamp, `#19` model id
+//! - root `#1` chatModel: `#4` usage, `#9.#4` legacy timestamp, `#11` time to
+//!   first token and `#12` streaming duration (`google.protobuf.Duration`),
+//!   `#19` model id
 //! - usage: `#1` system prompt + `#2` new input, `#5` cache read, `#9` output,
 //!   `#10` thinking (disjoint from `#9`), `#11` responseId
 //! - root `#2`: index into `steps`, whose `metadata.#1` is the step timestamp;
@@ -149,7 +151,7 @@ pub fn parse(path: &Path) -> io::Result<Session> {
             key,
             input_is_split: false,
             cache_write_1h_raw: 0,
-            duration_ms: 0,
+            duration_ms: response_ms(chat),
         });
     }
     Ok(session)
@@ -217,6 +219,23 @@ impl SessionModels {
             None => self.sole_model.as_deref(),
         }
     }
+}
+
+/// Time to first token plus streaming duration, or 0 when either is missing
+/// or the sum is implausible.
+fn response_ms(chat: &[u8]) -> u32 {
+    // proto3 omits zero fields, so a sub-second duration has no seconds.
+    let part = |number| {
+        let duration = proto::bytes(chat, number)?;
+        let seconds = i64::try_from(proto::varint(duration, 1).unwrap_or(0)).ok()?;
+        let nanos = i64::try_from(proto::varint(duration, 2).unwrap_or(0)).ok()?;
+        seconds.checked_mul(1000)?.checked_add(nanos / 1_000_000)
+    };
+    part(11)
+        .zip(part(12))
+        .and_then(|(first_token, streaming)| first_token.checked_add(streaming))
+        .filter(|ms| *ms > 0 && *ms <= super::MAX_RESPONSE_MS)
+        .map_or(0, |ms| ms as u32)
 }
 
 /// tokscale's generic Antigravity router id carries no concrete model identity.
